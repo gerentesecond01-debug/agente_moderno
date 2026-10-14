@@ -12,46 +12,58 @@ let autoHomeUsed=false;
 let teleportGraceUntil=0;
 const avataresCumprimentados = new Set();
 
-// Replies are honest about automation and rotate per sender without repeats until exhausted.
+// Uma resposta curta por visitante por sessão; IMs adicionais são ignoradas.
+// O indicador de digitação depende de suporte da versão de node-metaverse.
 const normalReplies=[
-"Hi! This is an automated reply while the account owner is studying.",
-"Hello! I'm currently in a study session. Please leave a message.",
-"Thanks for writing! This account is in conference mode right now.",
-"Hi there! My automated assistant is handling messages while I'm busy.",
-"Hello! I'm attending a virtual class and may respond later.",
-"Hey! This is an automatic message during my study time.",
-"Thanks for reaching out! I'm currently at a conference.",
-"Hi! I'm unavailable while studying, but your message is welcome.",
-"Hello! I'm focused on a learning event at the moment.",
-"Hi there! This account sends automatic replies while I'm away."
+"Hi! Sorry, I'm studying for a conference right now. Excuse me, please!",
+"Hello! I'm reviewing my notes at the moment. Have a lovely day!",
+"Hey! I'm attending a virtual seminar, so I can't chat. Take care!",
+"Hi there! I'm preparing for a presentation. Sorry, I need to focus!",
+"Hello! I'm in the middle of a study session. Please excuse me!",
+"Hey! I'm busy with my coursework right now. Catch you another time!",
+"Hi! I'm following a lecture at the moment. Sorry, talk later!",
+"Hello there! I'm studying for an upcoming conference. Have a good one!",
+"Hey, thanks for saying hi! I need to get back to studying. Bye!",
+"Hi! I'm occupied with an online class. Excuse me and take care!"
 ];
 const botReplies=[
-"Yes, this account uses an automated assistant while the owner studies.",
-"You're receiving an automatic response; the account owner is busy.",
-"This avatar is currently managed by an automated assistant.",
-"Good question! Automation is enabled while the operator is away.",
-"I'm an automated helper for this avatar during a conference.",
-"This is an automated reply, and the owner will check messages later.",
-"Yes, an assistant handles messages while the account owner is studying.",
-"I'm a virtual assistant responding while the operator is unavailable.",
-"This account is using automation during a class.",
-"You're chatting with an automated assistant at the moment."
+"Hi! This account has an automatic reply while its operator studies. Excuse me!",
+"Hello! An automated assistant is handling messages during a conference. Take care!",
+"Hey! This is an automatic reply while the account owner is busy studying. Bye!",
+"Hi there! Automation is enabled while the operator attends a class. Excuse me!",
+"Hello! This account uses automated replies during study sessions. Have a good day!",
+"Hi! An automated assistant is replying because the operator is unavailable. Bye!",
+"Hey! This is an automatic response while the operator prepares for a presentation. Take care!",
+"Hello! The account owner is studying, so this message is automated. Excuse me!",
+"Hi! This avatar uses automated replies during a virtual seminar. Talk later!",
+"Hey there! This is an automated message while the operator is occupied. Bye!"
 ];
-const replyStates=new Map();
+const repliedVisitors=new Set();
+const pendingReplyTimers=new Set();
+let lastNormalIndex=-1,lastBotIndex=-1;
+function chooseReply(question){
+ const pool=question?botReplies:normalReplies;
+ const previous=question?lastBotIndex:lastNormalIndex;
+ const n=Math.floor(Math.random()*(pool.length-1));
+ const index=n>=previous&&previous>=0?n+1:n;
+ if(question)lastBotIndex=index;else lastNormalIndex=index;
+ return pool[index];
+}
 function autoReply(e,msg){
- if(!e.from||!msg||isTeleportAdmin(e))return;
- const id=e.from.toString(),now=Date.now();
- let state=replyStates.get(id);
- if(!state){state={normal:[],bot:[],last:0};replyStates.set(id,state);}
- if(now-state.last<180000)return; // 3 minute cooldown per person
- const kind=/\b(bot|robot|automated|automation|ai|npc|scripted)\b/i.test(msg)?'bot':'normal';
- const pool=kind==='bot'?botReplies:normalReplies;
- if(state[kind].length===pool.length)state[kind]=[];
- const remaining=pool.map((_,i)=>i).filter(i=>!state[kind].includes(i));
- const chosen=remaining[Math.floor(Math.random()*remaining.length)];
- state[kind].push(chosen);state.last=now;
- Promise.resolve(bot.clientCommands.comms.sendInstantMessage(e.from,pool[chosen])).catch(er=>console.error('[AutoReply] '+er.message));
- if(replyStates.size>1000)for(const [key,val] of replyStates)if(now-val.last>7*86400000)replyStates.delete(key);
+ if(!e.from||!msg||isTeleportAdmin(e)||shuttingDown)return;
+ const id=e.from.toString();
+ if(repliedVisitors.has(id))return;
+ repliedVisitors.add(id); // bloqueia mensagens repetidas inclusive durante o atraso
+ const question=/\b(bot|robot|automated|automation|ai|npc|scripted)\b/i.test(msg);
+ const reply=chooseReply(question);
+ const delay=3000+Math.floor(Math.random()*5000);
+ const timer=setTimeout(async()=>{
+   pendingReplyTimers.delete(timer);
+   if(shuttingDown||!slOnline||!bot?.clientCommands?.comms)return;
+   try{await bot.clientCommands.comms.sendInstantMessage(e.from,reply);}
+   catch(err){console.error('[AutoReply] '+(err.message||err));}
+ },delay);
+ pendingReplyTimers.add(timer);
 }
 // Wait for region maintenance; never spam teleport requests.
 let regionWatchTimer=null,regionMismatchAt=0,returnAttempts=0,lastReturnAt=0;
@@ -188,7 +200,7 @@ function iniciarConexaoBot(){ if(shuttingDown)return; slOnline=false; notifyPare
  }
 }).catch(err=>{ console.error('Erro detectado no login ou conexão:',err.message||err); agendarReconexao('erro no login ou conexão: '+(err.message||err),hasConnectedOnce?Number(cfg.features.regionRecoveryMs||process.env.SL_REGION_RECOVERY_DELAY_MS||90000):Number(cfg.features.reconnectMs||15000)); }); }
 function configurarRotinasAutomaticas(){ limparRotinasAutomaticas(); if(cfg.features.localAnnouncementEnabled){ intervaloAnuncio=setInterval(()=>{ if(bot.clientCommands&&bot.clientCommands.comms){ bot.clientCommands.comms.say(cfg.features.announcementMessage,0); console.log('[Anúncio] Mensagem automática enviada no chat local.'); } },Number(cfg.features.announcementMinutes||15)*60*1000); }
- if(cfg.features.welcomeEnabled&&bot.clientEvents.onNearbyChat){ bot.clientEvents.onNearbyChat.subscribe(e=>{ const id=e.from.toString(); if(id===botUUID||e.fromName==='Sistema')return; if(!avataresCumprimentados.has(id)){ avataresCumprimentados.add(id); console.log(`[Boas-vindas] Avatar detectado: ${e.fromName}. Enviando IM...`); setTimeout(()=>bot.clientCommands.comms.sendInstantMessage(e.from,cfg.features.welcomeMessage).catch(er=>console.error('Erro ao enviar IM:',er.message||er)),2000); } }); }
+ if(false && cfg.features.welcomeEnabled&&bot.clientEvents.onNearbyChat){ bot.clientEvents.onNearbyChat.subscribe(e=>{ const id=e.from.toString(); if(id===botUUID||e.fromName==='Sistema')return; if(!avataresCumprimentados.has(id)){ avataresCumprimentados.add(id); console.log(`[Boas-vindas] Avatar detectado: ${e.fromName}. Enviando IM...`); setTimeout(()=>bot.clientCommands.comms.sendInstantMessage(e.from,cfg.features.welcomeMessage).catch(er=>console.error('Erro ao enviar IM:',er.message||er)),2000); } }); }
  if(bot.clientEvents.onLure) bot.clientEvents.onLure.subscribe(async lure=>{
   try{
     const who=(lure&&lure.fromName)||(lure&&lure.from&&lure.from.toString())||'desconhecido';
@@ -258,4 +270,4 @@ async function processCommand(message){ let text=message.trim(); if(text.startsW
 async function boot(){ if(!BOT_ID)throw new Error('BOT_ID ausente. Inicie pelo Agent.'); cfg=loadRuntimeConfig(); if(!cfg)throw new Error(`Configuração do bot ${BOT_ID} ausente.`); validarCredenciais(); loginParameters=makeLoginParameters(true); bot=new nmv.Bot(loginParameters,options); iniciarConexaoBot(); }
 boot().catch(err=>{ console.error('Erro ao iniciar bot:',err.message||err); process.exit(1); });
 process.on('message',async message=>{ try{ if(!message)return; if(!bot||!bot.clientCommands||!slOnline)throw new Error('Bot ainda não está online no Second Life.'); if(message.type==='TELEPORT'){const result=await processTeleportUrl(String(message.payload?.destination||''));console.log('[Teleporte programado] '+result);if(message.payload?.autoSit&&message.payload?.objectUUID)agendarAutoSitNaRegiao(String(message.payload.destination),String(message.payload.objectUUID));return;} if(message.type==='GROUP_INVITE'){ const result=await sendGroupInviteFromConfig(message.payload||{}); console.log(`[Grupo] ${result}`); return; } if(message.type==='GO_HOME'){ const result=await goHomeFromConfig(); console.log(`[Home] ${result}`); return; } }catch(err){ console.error('[Comando] Erro:',err.message||err); } });
-process.on('SIGTERM',async()=>{ shuttingDown=true; slOnline=false; notifyParent('SL_OFFLINE',{botId:BOT_ID,reason:'SIGTERM recebido',phase:'offline'}); console.log('Recebido SIGTERM. Encerrando bot.'); limparRotinasAutomaticas(); if(reconnectTimer)clearTimeout(reconnectTimer); if(regionWatchTimer)clearInterval(regionWatchTimer); try{ if(bot&&typeof bot.logout==='function') await Promise.race([bot.logout(),new Promise(r=>setTimeout(r,2500))]); }catch(e){ console.log('Logout SL finalizado com aviso:',e.message||e); } process.exit(0); });
+process.on('SIGTERM',async()=>{ shuttingDown=true; slOnline=false; notifyParent('SL_OFFLINE',{botId:BOT_ID,reason:'SIGTERM recebido',phase:'offline'}); console.log('Recebido SIGTERM. Encerrando bot.'); limparRotinasAutomaticas(); for(const t of pendingReplyTimers)clearTimeout(t); pendingReplyTimers.clear(); if(reconnectTimer)clearTimeout(reconnectTimer); if(regionWatchTimer)clearInterval(regionWatchTimer); try{ if(bot&&typeof bot.logout==='function') await Promise.race([bot.logout(),new Promise(r=>setTimeout(r,2500))]); }catch(e){ console.log('Logout SL finalizado com aviso:',e.message||e); } process.exit(0); });
