@@ -15,3 +15,9 @@ O contexto da conversa fica apenas na memória do processo e se perde no reiníc
 O bot não se apresenta espontaneamente como humano e esclarece a automação quando perguntado.
 Não envia comandos administrativos à IA; administradores continuam no fluxo de controle existente.
 Não foram feitos testes ao vivo no Second Life ou no Render.
+
+## Ajustes de conversa
+- Responde no idioma do visitante e não inclui seu nome nas respostas.
+- Ao perguntar sobre automação, responde discretamente e sem revelar dados técnicos.
+- Não envia nome ou UUID real do visitante à API de IA; usa o identificador da sessão local como memória, e envia `anonymous` no campo `userId` para preservar privacidade.
+- Respostas da API passam por filtro básico de links, UUIDs e segredos. Esse filtro não garante proteção completa contra vazamentos; nunca forneça segredos ao modelo.
