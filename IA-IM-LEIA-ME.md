@@ -15,3 +15,11 @@ A IA recebe apenas contexto curto do visitante e o texto da mensagem, não o UUI
 O Agent não afirma ser humano e responde honestamente quando questionado sobre automação, sem revelar detalhes técnicos. O texto sobre conferência só pode ser usado como assunto contextual, não como fato inventado.
 
 Não inclui indicador visual de digitação; só atraso. O filtro de vazamento é básico, não garantia. Não foram realizados testes no Second Life/Render.
+
+
+## Correção de comportamento
+- Mencionar a palavra "bot" não encerra a conversa.
+- Encerramento apenas quando o contexto justificar ou o limite for atingido.
+- Menos cumprimentos genéricos e sem repetir nomes.
+- Perguntas diretas sobre automação recebem respostas breves e verdadeiras.
+- O serviço externo pode não seguir perfeitamente as instruções; testar em IM real.
