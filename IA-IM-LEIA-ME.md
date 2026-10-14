@@ -1,23 +1,17 @@
-# Nexus — IA para IM do Second Life
+# Nexus — Conversas dinâmicas por IM
 
-Integração com API `/ask` no formato do script SPIKE AI ULTRA v6.6.
-O Agent responde mensagens privadas, com memória curta por visitante, respostas curtas em inglês e atraso antes de enviar.
+A IA cria todas as mensagens em tempo real e decide quando se despedir. Não há roteiro de conversa ou lista de respostas normais pré-gravadas. A API deve aceitar POST JSON `{ "message": "...", "userName": "Visitor", "userId": "anonymous" }` e responder `{ "reply": "..." }`.
 
-## Configuração no Render
-- `SL_AI_URL`: URL HTTPS da API, padrão `https://bots2-twze.onrender.com/ask`
-- `SL_AI_ENABLED`: `true` (padrão) ou `false` para respostas de reserva.
-- `SL_AI_API_KEY`: opcional, enviado como Bearer token.
+## Variáveis do Render (Agent)
+- `SL_AI_URL`: endpoint da IA, padrão `https://bots2-twze.onrender.com/ask`
+- `SL_AI_ENABLED`: `true` por padrão. Com `false`, envia uma despedida de indisponibilidade.
+- `SL_AI_API_KEY`: opcional, Bearer token
+- `SL_AI_MAX_REPLIES`: máximo de respostas por conversa, padrão 8
+- `SL_AI_SILENCE_MINUTES`: pausa individual após despedida, padrão 60; 0 = até reiniciar o Agent
+- `SL_AI_DELAY_MIN_MS`: atraso mínimo antes da resposta, padrão 2200
 
-A API precisa responder JSON como `{"reply":"Hello!"}`.
-O serviço de IA não foi fornecido e pode estar indisponível; neste caso o Agent usa respostas de reserva.
-O indicador visual de digitação não está implementado.
-O contexto da conversa fica apenas na memória do processo e se perde no reinício.
-O bot não se apresenta espontaneamente como humano e esclarece a automação quando perguntado.
-Não envia comandos administrativos à IA; administradores continuam no fluxo de controle existente.
-Não foram feitos testes ao vivo no Second Life ou no Render.
+A IA recebe apenas contexto curto do visitante e o texto da mensagem, não o UUID/nome reais. O histórico fica na memória do processo e é perdido no reinício. A IA indica encerramento acrescentando `[[END_CHAT]]` à despedida; o Agent remove esse marcador antes de enviar. Se a API falhar, o Agent envia uma única despedida de indisponibilidade e pausa a conversa. O serviço externo da IA não foi fornecido nem testado.
 
-## Ajustes de conversa
-- Responde no idioma do visitante e não inclui seu nome nas respostas.
-- Ao perguntar sobre automação, responde discretamente e sem revelar dados técnicos.
-- Não envia nome ou UUID real do visitante à API de IA; usa o identificador da sessão local como memória, e envia `anonymous` no campo `userId` para preservar privacidade.
-- Respostas da API passam por filtro básico de links, UUIDs e segredos. Esse filtro não garante proteção completa contra vazamentos; nunca forneça segredos ao modelo.
+O Agent não afirma ser humano e responde honestamente quando questionado sobre automação, sem revelar detalhes técnicos. O texto sobre conferência só pode ser usado como assunto contextual, não como fato inventado.
+
+Não inclui indicador visual de digitação; só atraso. O filtro de vazamento é básico, não garantia. Não foram realizados testes no Second Life/Render.
