@@ -3,13 +3,18 @@
 const UUID=/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
 function createState(){return {dialogs:[],walk:null};}
 function safe(x){return String(x??'').slice(0,300);}
+function operationFailed(message){return /indispon[ií]vel|n[aã]o disponibiliza|n[aã]o retornou|sem comandos|falha|nenhuma opera[cç][aã]o|n[aã]o oferece|n[aã]o foi enviada|erro ao consultar/i.test(String(message));}
+function resultOf(message){return {ok:!operationFailed(message),message};}
 function recordDialog(state,d){
- const data=d?.body||d?.data||d||{};
- const id=safe(data?.objectID||data?.objectId||data?.ObjectID||data?.sourceID||'');
+ const outer=d?.body||d?.data||d||{};
+ const data=outer?.ScriptDialog?.[0]||outer?.DialogData?.[0]||outer?.DialogData||outer?.Data?.[0]||outer;
+ const first=(...values)=>values.find(v=>v!==undefined&&v!==null);
+ const asText=v=>Buffer.isBuffer(v)?v.toString('utf8').replace(/\0+$/,''):String(v??'');
+ const id=safe(asText(first(data?.objectID,data?.objectId,data?.ObjectID,data?.sourceID,data?.ObjectId,'')));
  const channel=Number(data?.chatChannel??data?.channel??data?.Channel);
- const raw=data?.buttons||data?.Buttons||data?.buttonLabels||[];
- const buttons=Array.isArray(raw)?raw.map(safe).slice(0,24):[];
- state.dialogs.unshift({id,channel:Number.isInteger(channel)?channel:null,message:safe(data?.message||data?.Message),buttons,at:new Date().toISOString()});
+ const raw=first(data?.buttons,data?.Buttons,data?.buttonLabels,outer?.Buttons,[]);
+ const buttons=Array.isArray(raw)?raw.map(v=>safe(asText(v?.ButtonLabel??v?.label??v))).filter(Boolean).slice(0,24):[];
+ state.dialogs.unshift({id,channel:Number.isInteger(channel)?channel:null,message:safe(asText(first(data?.message,data?.Message,outer?.Message,''))),buttons,at:new Date().toISOString()});
  state.dialogs=state.dialogs.slice(0,20);
 }
 function regionSnapshot(bot){
@@ -24,10 +29,10 @@ async function execute(bot,state,p,groups){
  const action=safe(p.action).toLowerCase();
  const g=bot?.clientCommands?.group||bot?.clientCommands?.groups;
  if(action==='snapshot')return {ok:true,region:regionSnapshot(bot),dialogs:state.dialogs,walk:state.walk,capabilities:{groupList:!!g&&['getCurrentGroups','getGroups','getGroupList','listGroups'].some(k=>typeof g[k]==='function'),hudReply:!!bot?.clientCommands?.comms?.respondToScriptDialog,autoWalk:!!bot?.clientCommands?.movement?.autoPilot}};
- if(action==='groups'){const message=await groups.listGroupsByAdminCommand();return {ok:!/(indispon[ií]vel|n[aã]o disponibiliza|n[aã]o retornou|sem comandos)/i.test(message),message};}
+ if(action==='groups'){const message=await groups.listGroupsByAdminCommand();return resultOf(message);}
  if(action==='leavegroup'){
   if(!UUID.test(safe(p.groupID)))throw Error('UUID do grupo inválido');
-  const message=await groups.leaveGroupByAdminCommand(p.groupID);return {ok:!/(indispon[ií]vel|n[aã]o disponibiliza|falha|nenhuma opera[cç][aã]o)/i.test(message),message};
+  const message=await groups.leaveGroupByAdminCommand(p.groupID);return resultOf(message);
  }
  if(action==='invite'){
   if(!UUID.test(safe(p.avatarID))||!UUID.test(safe(p.groupID)))throw Error('UUID de grupo ou avatar inválido');
@@ -35,7 +40,7 @@ async function execute(bot,state,p,groups){
  }
  if(action==='groupmessage'){
   if(!UUID.test(safe(p.groupID)))throw Error('UUID do grupo inválido');
-  const message=await groups.sendGroupChatByAdmin(p.groupID,p.text);return {ok:true,message};
+  const message=await groups.sendGroupChatByAdmin(p.groupID,p.text);return resultOf(message);
  }
  if(action==='hud'){
   const index=Number(p.index);const d=state.dialogs[index];
