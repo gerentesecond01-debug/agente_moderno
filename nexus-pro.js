@@ -24,6 +24,7 @@ async function execute(bot,state,p,groups){
  const action=safe(p.action).toLowerCase();
  const g=bot?.clientCommands?.group||bot?.clientCommands?.groups;
  if(action==='snapshot')return {ok:true,region:regionSnapshot(bot),dialogs:state.dialogs,walk:state.walk,capabilities:{groupList:!!g&&['getCurrentGroups','getGroups','getGroupList','listGroups'].some(k=>typeof g[k]==='function'),hudReply:!!bot?.clientCommands?.comms?.respondToScriptDialog,autoWalk:!!bot?.clientCommands?.movement?.autoPilot}};
+ if(action==='group_diagnostic'){return {ok:true,diagnostic:JSON.parse(await groups.groupDiagnosticCommand())};}
  if(action==='groups'){const message=await groups.listGroupsByAdminCommand();return {ok:!/(indispon[ií]vel|n[aã]o disponibiliza|n[aã]o retornou|sem comandos)/i.test(message),message};}
  if(action==='leavegroup'){
   if(!UUID.test(safe(p.groupID)))throw Error('UUID do grupo inválido');
