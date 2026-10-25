@@ -42,22 +42,47 @@ async function execute(bot,state,p,groups){
   if(!UUID.test(groupID))throw Error('UUID do grupo inválido');
   if(!subject||subject.length>120)throw Error('Assunto obrigatório (máximo 120 caracteres)');
   if(!message||message.length>900)throw Error('Mensagem obrigatória (máximo 900 caracteres)');
-  // Use only a native Group Notice API, never group chat or a fabricated IM packet.
-  const group=bot?.clientCommands?.group||bot?.clientCommands?.groups;
-  const names=['sendGroupNotice','sendNotice','createGroupNotice','postGroupNotice'];
-  const name=names.find(k=>typeof group?.[k]==='function');
-  if(!name){
-   const available=group?Object.getOwnPropertyNames(Object.getPrototypeOf(group)).filter(k=>/notice|group/i.test(k)).slice(0,40):[];
-   console.warn('[Notice] API de notice ausente. Métodos do grupo:',available);
-   return {ok:false,error:'A biblioteca instalada não expõe um método de envio de Group Notice. Nenhum notice foi enviado.',diagnostic:{groupMethods:available}};
+  // Firestorm viewer-develop: send_group_notice -> ImprovedInstantMessage,
+  // Dialog=IM_GROUP_NOTICE (32), ToAgentID=group, Message="subject|body".
+  // Reuse the library's working IM packet constructor instead of inventing one.
+  const circuit=bot?.currentRegion?.circuit;
+  const comms=bot?.clientCommands?.comms;
+  if(typeof circuit?.sendMessage!=='function'||typeof comms?.sendInstantMessage!=='function')
+   return {ok:false,error:'Circuito de IM não disponível; notice não enviado.'};
+  if(subject.includes('|'))throw Error('Assunto não pode conter |');
+  const {UUID: UUIDClass}=require('@caspertech/node-metaverse');
+  const groupUUID=new UUIDClass(groupID);
+  const original=circuit.sendMessage;
+  let changed=false;
+  // Protect against overlapping requests: do not intercept another notice.
+  if(circuit.__nexusNoticeBusy)return {ok:false,error:'Outro notice está sendo enviado. Tente novamente.'};
+  circuit.__nexusNoticeBusy=true;
+  let restoreTimer;
+  const restore=()=>{if(circuit.sendMessage===intercept)circuit.sendMessage=original;clearTimeout(restoreTimer);circuit.__nexusNoticeBusy=false;};
+  function intercept(packet,...args){
+   if(!changed&&packet?.constructor?.name==='ImprovedInstantMessageMessage'){
+    const block=packet.MessageBlock;
+    const entry=Array.isArray(block)?block[0]:block;
+    if(entry&&String(entry.ToAgentID||'').toLowerCase()===groupID.toLowerCase()){
+     entry.Dialog=32;
+     entry.Message=Buffer.from(subject+'|'+message,'utf8');
+     entry.BinaryBucket=Buffer.from([0]);
+     entry.ID=new UUIDClass('00000000-0000-0000-0000-000000000000');
+     entry.Offline=1;
+     changed=true;
+    }
+   }
+   return original.call(circuit,packet,...args);
   }
   try{
-   // The library's group commands accept UUID objects for group IDs.
-   const UUIDClass=require('@caspertech/node-metaverse').UUID;
-   await group[name](new UUIDClass(groupID),subject,message);
-   console.log(`[Notice] Chamada ${name} concluída para ${groupID}; publicação ainda não confirmada.`);
-   return {ok:true,confirmed:false,message:`Solicitação de notice enviada por ${name}. Confira a aba Notices do grupo no Firestorm.`};
-  }catch(e){console.error('[Notice] Falha:',e);return {ok:false,error:`Falha ao solicitar notice via ${name}: ${e.message||e}`};}
+   circuit.sendMessage=intercept;
+   restoreTimer=setTimeout(restore,12000);
+   await comms.sendInstantMessage(groupUUID,'');
+   if(!changed)throw Error('O IM não passou pelo circuito esperado; notice não confirmado.');
+   console.log('[Notice] IM_GROUP_NOTICE (32) enviado ao circuito para '+groupID);
+   return {ok:true,confirmed:false,message:'Pacote de Group Notice enviado ao Second Life. Verifique a aba Notices do grupo para confirmar a publicação.'};
+  }catch(err){console.error('[Notice] Falha no envio:',err);return {ok:false,error:'Falha no envio do notice: '+(err.message||err)};}
+  finally{restore();}
  }
  if(action==='hud'){
   const index=Number(p.index);const d=state.dialogs[index];
