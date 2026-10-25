@@ -316,23 +316,11 @@ async function sendGroupInvitationAccept({groupID,invitationID,fee}) {
   if (groupCommands && typeof groupCommands.acceptInvitation === 'function') {
    await groupCommands.acceptInvitation(new nmv.UUID(groupID),new nmv.UUID(invitationID));
   } else {
-   const { ImprovedInstantMessageMessage } = require('@caspertech/node-metaverse/dist/lib/classes/messages/ImprovedInstantMessage.js');
-   const { PacketFlags } = require('@caspertech/node-metaverse/dist/lib/enums/PacketFlags.js');
-   const { InstantMessageOnline } = require('@caspertech/node-metaverse/dist/lib/enums/InstantMessageOnline.js');
-   const { Utils } = require('@caspertech/node-metaverse/dist/lib/classes/Utils.js');
-   const circuit=bot.currentRegion?.circuit, agent=bot.agent;
-   if(!circuit||!agent?.agentID||!circuit.sessionID) throw new Error('Circuito indisponivel.');
-   const packet=new ImprovedInstantMessageMessage();
-   packet.AgentData={AgentID:agent.agentID,SessionID:circuit.sessionID};
-   packet.MessageBlock={FromGroup:false,ToAgentID:new nmv.UUID(groupID),ParentEstateID:0,
-    RegionID:nmv.UUID.zero(),Position:nmv.Vector3.getZero(),Offline:InstantMessageOnline.Online,
-    Dialog:35,ID:new nmv.UUID(invitationID),Timestamp:Math.floor(Date.now()/1000),
-    FromAgentName:Utils.StringToBuffer(`${agent.firstName} ${agent.lastName}`),
-    Message:Utils.StringToBuffer(''),BinaryBucket:Buffer.alloc(1)};
-   const seq=circuit.sendMessage(packet,PacketFlags.Reliable);
-   await circuit.waitForAck(seq,10000);
+   // Nao construir ImprovedInstantMessage manualmente: a versao instalada
+   // exige campos internos adicionais e o circuito retransmite o pacote invalido.
+   throw new Error('Biblioteca sem metodo seguro acceptInvitation; pacote manual desativado para evitar queda do Agent.');
   }
-  console.log(`[Grupo] Resposta de aceite enviada para ${groupID}; ainda requer confirmacao de membro.`);
+  console.log(`[Grupo] Pedido de aceite processado para ${groupID}; confirmar ingresso na lista de membros.`);
  } catch(err) {
   recentGroupInvites.delete(dedupeKey);
   console.error('[Grupo] Erro ao responder convite:',err.message||err);
