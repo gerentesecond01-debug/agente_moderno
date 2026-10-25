@@ -296,19 +296,10 @@ async function handleAuthorizedGroupInvitation(e) {
  console.log(`[Grupo] Convite: grupo=${groupID||'desconhecido'} convite=${invitationID||'desconhecido'} convidador=${inviterID||'nao informado'} taxa=${fee===null?'desconhecida':fee}`);
  if (cfg.features?.autoAcceptGroups === false) { console.log('[Grupo] Aceitar grupos desativado.'); return; }
  if (!groupID || !invitationID) { console.warn('[Grupo] Convite sem IDs necessarios; ignorado.'); return; }
- const admins=(cfg.security?.allowedAdminUUIDs||[]).map(uuidText).filter(Boolean);
- const trustAll=process.env.SL_TRUST_ALL_GROUP_INVITES === 'true';
- // O evento onGroupInvite desta biblioteca informa o UUID do grupo em 'from'.
- // Se o convidador nao for identificado, NAO ha como garantir que seja admin.
- if (!trustAll && (!inviterID || !admins.includes(inviterID))) {
-  console.warn('[Grupo] Ignorado: nao foi possivel verificar que o convite veio do admin. Para aceitar TODOS os convites, configure SL_TRUST_ALL_GROUP_INVITES=true no Render (menos seguro).');
-  return;
- }
- if (trustAll) console.warn('[Grupo] MODO ABERTO: aceitando convite sem verificar remetente ou taxa. Qualquer pessoa que convide este bot pode faze-lo entrar em um grupo.');
- if (!trustAll && fee !== 0) {
-  console.warn('[Grupo] Taxa desconhecida ou paga; convite ignorado.');
-  return;
- }
+ // A biblioteca informa o grupo e o ID do convite, mas nao o UUID do convidador.
+ // Modo automatico sem configuracao adicional: todos os convites recebidos podem ser aceitos.
+ console.warn('[Grupo] Aceite automatico habilitado: origem do convite nao verificavel; qualquer pessoa pode convidar este bot.');
+ if (fee !== 0) console.warn('[Grupo] Taxa nao confirmada como gratuita. O Second Life pode cobrar L$ se houver saldo.');
  await sendGroupInvitationAccept({groupID,invitationID,fee});
 }
 
