@@ -467,16 +467,25 @@ async function sendGroupChatByAdmin(groupText,messageText){
 }
 async function groupDiagnosticCommand(){ return JSON.stringify(groupProtocolDiagnostic.report(bot,groupMembership)); }
 async function listGroupsByAdminCommand(){
- const g=groupCommands();
- const method=g&&['getCurrentGroups','getGroups','getGroupList','listGroups'].find(k=>typeof g[k]==='function');
- if(method){
-  try{groupMembership.capture(await g[method](),'group.'+method);}catch(err){console.warn('[Grupos] Consulta direta falhou:',err.message||err);}
+ // API confirmada no diagnostico da biblioteca 0.8.22:
+ // clientCommands.agent.getAvatarGroups(avatarID).
+ const agent=bot?.clientCommands?.agent;
+ if(typeof agent?.getAvatarGroups!=='function')
+  return 'Consulta indisponivel: agent.getAvatarGroups nao existe nesta sessao.';
+ const avatarID=String(botUUID||bot?.agentID||bot?.agent?.agentID||'').trim();
+ if(!/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(avatarID))
+  return 'Consulta indisponivel: UUID do proprio avatar ainda nao foi identificado.';
+ try{
+  const result=await agent.getAvatarGroups(new nmv.UUID(avatarID));
+  const count=groupMembership.capture(result,'agent.getAvatarGroups');
+  const rows=groupMembership.list();
+  console.log('[Grupos] getAvatarGroups consultado; novos='+count+'; total_cache='+rows.length);
+  if(!rows.length)return 'Consulta getAvatarGroups concluida, mas nenhuma entrada de grupo foi interpretada. Confira [Grupos] no Render e !diagnosticogrupos.';
+  return `Grupos (${rows.length}): ${rows.slice(0,30).map(i=>`${i.name} (${i.id})`).join('; ')}`.slice(0,1800);
+ }catch(err){
+  console.error('[Grupos] agent.getAvatarGroups falhou:',err?.stack||err);
+  return 'Falha ao consultar grupos via agent.getAvatarGroups: '+String(err?.message||err).slice(0,350);
  }
- // O login e eventos do simulador podem trazer a lista, mesmo sem metodo de consulta.
- const rows=groupMembership.list();
- if(!rows.length)return 'Ainda nao recebi uma lista de grupos do Second Life nesta sessao. A biblioteca nao expoe consulta direta; nenhum grupo foi inventado.';
- const info=groupMembership.status();
- return `Grupos recebidos (${rows.length}; origem ${info.source}): ${rows.slice(0,30).map(i=>`${i.name} (${i.id})`).join('; ')}`.slice(0,1800);
 }
 // O comando por IM usa UUID do remetente, nao nome de exibicao.
 // UUID de grupo sozinho nao e autorizacao de ingresso no Second Life.
