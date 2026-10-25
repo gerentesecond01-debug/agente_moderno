@@ -291,27 +291,25 @@ function inviteField(e, names) {
 async function handleAuthorizedGroupInvitation(e) {
  const groupID = inviteField(e, ['groupID','groupId','GroupID','groupUUID','groupUUIDString','from']);
  const invitationID = inviteField(e, ['imSessionID','sessionID','sessionId','invitationID','inviteID','ID']);
- // Somente campos EXPLICITAMENTE atribuídos ao convidador; `from` é ambíguo.
  const inviterID = inviteField(e, ['inviterID','inviterId','inviterUUID','inviterAgentID','invitedByID','invitedByUUID']);
  const fee = invitationFee(e);
- console.log(`[Grupo] Convite recebido: grupo=${groupID||'desconhecido'} convite=${invitationID||'desconhecido'} convidador=${inviterID||'nao informado'} taxa=${fee===null?'desconhecida':fee}`);
- if (cfg.features?.autoAcceptGroups === false) { console.log('[Grupo] Autoaceite desativado.'); return; }
- if (groupID && invitationID) {
-  pendingGroupInvites.set(groupID,{groupID,invitationID,fee,receivedAt:Date.now()});
-  for(const [id,item] of pendingGroupInvites) if(Date.now()-item.receivedAt>600000) pendingGroupInvites.delete(id);
- }
-
- const admins = (cfg.security?.allowedAdminUUIDs || []).map(uuidText).filter(Boolean);
- if (!inviterID) {
-  console.warn('[Grupo] Aguardando autorizacao via IM do administrador: !aceitargrupo '+groupID+' (taxa desconhecida exige CONFIRMO).');
-  console.log('[Grupo] Campos do evento: '+Object.keys(e||{}).join(', '));
+ console.log(`[Grupo] Convite: grupo=${groupID||'desconhecido'} convite=${invitationID||'desconhecido'} convidador=${inviterID||'nao informado'} taxa=${fee===null?'desconhecida':fee}`);
+ if (cfg.features?.autoAcceptGroups === false) { console.log('[Grupo] Aceitar grupos desativado.'); return; }
+ if (!groupID || !invitationID) { console.warn('[Grupo] Convite sem IDs necessarios; ignorado.'); return; }
+ const admins=(cfg.security?.allowedAdminUUIDs||[]).map(uuidText).filter(Boolean);
+ const trustAll=process.env.SL_TRUST_ALL_GROUP_INVITES === 'true';
+ // O evento onGroupInvite desta biblioteca informa o UUID do grupo em 'from'.
+ // Se o convidador nao for identificado, NAO ha como garantir que seja admin.
+ if (!trustAll && (!inviterID || !admins.includes(inviterID))) {
+  console.warn('[Grupo] Ignorado: nao foi possivel verificar que o convite veio do admin. Para aceitar TODOS os convites, configure SL_TRUST_ALL_GROUP_INVITES=true no Render (menos seguro).');
   return;
  }
- if (!admins.includes(inviterID)) { console.log('[Grupo] Convite ignorado: convidador nao autorizado.'); return; }
- if (fee === null || !Number.isFinite(fee)) { console.log('[Grupo] Convite nao aceito: taxa nao confirmada.'); return; }
- if (fee !== 0) { console.log(`[Grupo] Convite nao aceito: taxa L$${fee}.`); return; }
- if (!groupID || !invitationID) { console.log('[Grupo] Convite incompleto; impossivel responder.'); return; }
- return await sendGroupInvitationAccept({groupID,invitationID,fee});
+ if (trustAll) console.warn('[Grupo] MODO ABERTO: aceitando convite sem verificar remetente ou taxa. Qualquer pessoa que convide este bot pode faze-lo entrar em um grupo.');
+ if (!trustAll && fee !== 0) {
+  console.warn('[Grupo] Taxa desconhecida ou paga; convite ignorado.');
+  return;
+ }
+ await sendGroupInvitationAccept({groupID,invitationID,fee});
 }
 
 async function sendGroupInvitationAccept({groupID,invitationID,fee}) {
@@ -400,24 +398,6 @@ function configurarRotinasAutomaticas(){ limparRotinasAutomaticas(); if(cfg.feat
  } else console.warn('[Grupo] Esta versao da biblioteca nao expoe onGroupInvite.');
  bot.clientEvents.onInstantMessage.subscribe(e=>{ try{
  const commandText=String(e.message||'').trim();
- const approval=commandText.match(/^!aceitargrupo\s+([0-9a-f-]{36})(?:\s+(CONFIRMO))?$/i);
- if(approval){
-  const sender=uuidText(e.from);
-  const admins=(cfg.security?.allowedAdminUUIDs||[]).map(uuidText).filter(Boolean);
-  if(!sender||!admins.includes(sender)){ console.warn('[Grupo] Comando de aprovacao rejeitado: UUID nao autorizado.'); return; }
-  const groupID=uuidText(approval[1]);
-  const pending=pendingGroupInvites.get(groupID);
-  let answer;
-  if(!pending||Date.now()-pending.receivedAt>600000){answer='Nenhum convite recente desse grupo. Envie um novo convite e tente em ate 10 minutos.';pendingGroupInvites.delete(groupID);}
-  else if(pending.fee!==0 && approval[2]!=='CONFIRMO') answer='Taxa nao confirmada como L$0. Para aceitar mesmo com taxa desconhecida, envie !aceitargrupo '+groupID+' CONFIRMO. Isso pode cobrar L$.';
-  else {
-   pendingGroupInvites.delete(groupID);
-   sendGroupInvitationAccept(pending).then(()=>console.log('[Grupo] Resposta enviada apos autorizacao explicita do administrador.')).catch(err=>console.error('[Grupo] Erro no aceite:',err.message||err));
-   answer='Resposta de aceite solicitada para '+groupID+'. Confira a lista de grupos do avatar.';
-  }
-  bot.clientCommands.comms.sendInstantMessage(e.from,answer).catch(()=>{});
-  return;
- }
  if(botUUID&&e.from.toString()===botUUID)return; if(e.dialog===InstantMessageDialog.GroupInvitation){ console.log('[Grupo] Convite chegou como IM; aguardando evento onGroupInvite.'); return; } const msg=String(e.message||'').trim(); const texto=msg.toLowerCase(); if(!isTeleportAdmin(e)&&!isCommand(texto)&&!texto.includes('maps.secondlife.com/secondlife/')){autoReply(e,msg);return;} if(cfg.features.allowRlv&&(msg.startsWith('@')||(e.binaryBucket&&e.binaryBucket.toString().includes('@')))){ processarRLV(e,msg,texto); return; } if(texto.includes('maps.secondlife.com/secondlife/')){ if(!cfg.features.allowTeleportLinks||rlvRestricoes.bloquearTeleporte){ bot.clientCommands.comms.sendInstantMessage(e.from,'Teleporte recusado por configuração ou restrição RLV ativa.').catch(()=>{}); return; } if(!isTeleportAdmin(e)){ console.log(`[Segurança] Link de teleporte ignorado de ${e.fromName||e.from||'desconhecido'}.`); bot.clientCommands.comms.sendInstantMessage(e.from,'Teleporte recusado: somente um administrador autorizado pode mover este bot.').catch(()=>{}); return; } processTeleportUrl(msg).catch(er=>console.error('Erro ao teleportar:',er.message||er)); return; } if(isCommand(texto)){ const isMovementCommand = /^(?:!\s*)?(?:tp|teleport|home)(?:\s|$)/i.test(msg); if(isMovementCommand && !isTeleportAdmin(e)){ console.log(`[Segurança] Comando de movimento ignorado de ${e.fromName||e.from||'desconhecido'}.`); bot.clientCommands.comms.sendInstantMessage(e.from,'Comando recusado: somente um administrador autorizado pode mover este bot.').catch(()=>{}); return; } if(!isAllowedAdmin(e)){ bot.clientCommands.comms.sendInstantMessage(e.from,'Você não tem permissão para comandar este bot.').catch(()=>{}); return; } processCommand(msg).then(resp=>bot.clientCommands.comms.sendInstantMessage(e.from,resp)).catch(er=>bot.clientCommands.comms.sendInstantMessage(e.from,er.message||'Erro no comando').catch(()=>{})); } }catch(err){ console.error('Erro ao processar IM:',err.message||err); } });
  bot.clientEvents.onNearbyChat.subscribe(e=>{ if(botUUID&&e.from.toString()===botUUID)return; const msg=String(e.message||'').trim(); const texto=msg.toLowerCase(); if(cfg.features.allowRlv&&msg.startsWith('@sit:')){ try{ const target=msg.split('sit:')[1].split('=')[0].trim(); bot.clientCommands.movement.sitOnObject(new nmv.UUID(target),new nmv.Vector3([0,0,0])).catch(()=>{}); }catch(_){} return; } if(!isCommand(texto))return; const isMovementCommand=/^(?:!\s*)?(?:tp|teleport|home)(?:\s|$)/i.test(msg); if(isMovementCommand&&!isTeleportAdmin(e)){ console.log(`[Segurança] Comando de movimento local ignorado de ${e.fromName||e.from||'desconhecido'}.`); return; } if(!isAllowedAdmin(e))return; processCommand(msg).then(resp=>bot.clientCommands.comms.say(resp,0)).catch(er=>bot.clientCommands.comms.say(er.message||'Erro no comando',0)); }); }
 function isCommand(t){ return t.startsWith('!')||t==='help'||t==='ajuda'||t.startsWith('sit ')||t==='stand'||t==='status'||t==='home'||t.startsWith('tp ')||t.startsWith('teleport ')||t.startsWith('say ')||t.startsWith('invite ')||t.startsWith('convidar ')||t.startsWith('groupinvite ')||t.startsWith('attach ')||t.startsWith('wear ')||t.startsWith('vestir ')||t.startsWith('detach ')||t.startsWith('tirar ')||t==='sitground'; }
