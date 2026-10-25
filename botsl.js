@@ -7,6 +7,7 @@ try {
 const BOT_ID = Number(process.env.BOT_ID || 0);
 // NEXUS PRO: comandos solicitados pelo Master. Nunca executa strings JS arbitrárias.
 const nexusPro = require('./nexus-pro');
+const groupMembership = require('./group-membership');
 const nexusProState = nexusPro.createState();
 
 function loadRuntimeConfig(){ const raw=process.env.BOT_CONFIG_B64||''; if(!raw) throw new Error('BOT_CONFIG_B64 ausente. Inicie pelo Agent.'); return JSON.parse(Buffer.from(raw,'base64').toString('utf8')); }
@@ -437,6 +438,7 @@ async function leaveGroupByAdminCommand(groupText){
  }
  const result=await confirmed;
  if(result.ok){
+  groupMembership.remove(id);
   console.log(`[Grupo] Saída confirmada pelo Second Life: ${id} (${result.groupName||'nome não informado'}).`);
   return `✅ Sucesso! Saí do grupo ${result.groupName||id}.`;
  }
@@ -464,16 +466,15 @@ async function sendGroupChatByAdmin(groupText,messageText){
 }
 async function listGroupsByAdminCommand(){
  const g=groupCommands();
- if(!g)return 'Lista indisponivel: biblioteca sem comandos de grupos.';
- const method=['getCurrentGroups','getGroups','getGroupList','listGroups'].find(k=>typeof g[k]==='function');
- if(!method)return 'Esta versao da biblioteca nao disponibiliza consulta de grupos.';
- try {
-  const result=await g[method]();
-  const entries=Array.isArray(result)?result:Array.isArray(result?.groups)?result.groups:Array.isArray(result?.Groups)?result.Groups:[];
-  if(!entries.length)return 'A consulta nao retornou grupos (isso nao confirma que o avatar esteja sem grupos).';
-  const rows=entries.slice(0,20).map(item=>`${String(item.name||item.Name||item.groupName||'Grupo')} (${String(item.id||item.ID||item.groupID||item.GroupID||'UUID indisponivel')})`);
-  return `Grupos (${entries.length}): ${rows.join('; ')}`.slice(0,900);
- }catch(err){return `Erro ao consultar grupos: ${err.message||err}`;}
+ const method=g&&['getCurrentGroups','getGroups','getGroupList','listGroups'].find(k=>typeof g[k]==='function');
+ if(method){
+  try{groupMembership.capture(await g[method](),'group.'+method);}catch(err){console.warn('[Grupos] Consulta direta falhou:',err.message||err);}
+ }
+ // O login e eventos do simulador podem trazer a lista, mesmo sem metodo de consulta.
+ const rows=groupMembership.list();
+ if(!rows.length)return 'Ainda nao recebi uma lista de grupos do Second Life nesta sessao. A biblioteca nao expoe consulta direta; nenhum grupo foi inventado.';
+ const info=groupMembership.status();
+ return `Grupos recebidos (${rows.length}; origem ${info.source}): ${rows.slice(0,30).map(i=>`${i.name} (${i.id})`).join('; ')}`.slice(0,1800);
 }
 // O comando por IM usa UUID do remetente, nao nome de exibicao.
 // UUID de grupo sozinho nao e autorizacao de ingresso no Second Life.
@@ -494,12 +495,13 @@ async function enterGroupByAdminCommand(groupText){
 }
 function isAllowedAdmin(e){ if(!cfg.features.onlyAllowedAdmins)return true; return getAdminIdentity(e).isAdmin; }
 function isTeleportAdmin(e){ return getAdminIdentity(e).isAdmin; }
-function iniciarConexaoBot(){ if(shuttingDown)return; slOnline=false; notifyParent('SL_CONNECTING',{botId:BOT_ID,phase:'connecting',reason:'Conectando ao Second Life...'}); console.log(`Tentando realizar login no Second Life para bot ${BOT_ID}...`); bot.login().then(r=>{ console.log('Login completo com sucesso!'); if(r&&r.agentID)botUUID=r.agentID.toString(); return bot.connectToSim(); }).then(async()=>{
+function iniciarConexaoBot(){ if(shuttingDown)return; slOnline=false; groupMembership.clear(); notifyParent('SL_CONNECTING',{botId:BOT_ID,phase:'connecting',reason:'Conectando ao Second Life...'}); console.log(`Tentando realizar login no Second Life para bot ${BOT_ID}...`); bot.login().then(r=>{ console.log('Login completo com sucesso!'); if(r&&r.agentID)botUUID=r.agentID.toString(); groupMembership.capture(r,'login'); return bot.connectToSim(); }).then(async()=>{
  const primeiraConexao=!hasConnectedOnce;
  hasConnectedOnce=true;
  slOnline=true;
  notifyParent('SL_ONLINE',{botId:BOT_ID,region:currentRegionName()});
  console.log('Conectado ao simulador! O bot está ativo.');
+ for(const name of ['onAgentGroupDataUpdate','onAgentGroupData','onGroupDataUpdate','onGroupList','onGroupsUpdate'])assinarEvento(name,e=>{const count=groupMembership.capture(e,name);if(count)console.log('[Grupos] '+count+' grupos recebidos em '+name);});
  configurarMonitorDeConexao();
  configurarRotinasAutomaticas();
  startRegionWatch();

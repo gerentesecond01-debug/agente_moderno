@@ -1,0 +1,10 @@
+'use strict';
+const assert=require('node:assert/strict');
+const m=require('./group-membership');
+m.clear();
+assert.equal(m.capture({Groups:[{GroupID:'5a9e1d7a-e7ba-bab0-27a0-11afa8cc3be6',GroupName:'Pleasure & Physics'}]},'test'),1);
+assert.deepEqual(m.list(),[{id:'5a9e1d7a-e7ba-bab0-27a0-11afa8cc3be6',name:'Pleasure & Physics'}]);
+assert.equal(m.capture({Members:[{GroupID:'00000000-0000-0000-0000-000000000001'}]},'invalid'),0);
+m.remove('5a9e1d7a-e7ba-bab0-27a0-11afa8cc3be6');
+assert.equal(m.list().length,0);
+console.log('Testes de cache de grupos: OK');
