@@ -37,7 +37,28 @@ async function execute(bot,state,p,groups){
   if(!UUID.test(safe(p.groupID)))throw Error('UUID do grupo inválido');
   const message=await groups.sendGroupChatByAdmin(p.groupID,p.text);return {ok:!/(indispon[ií]vel|n[aã]o enviad|falha|sem suporte|n[aã]o disponibiliza)/i.test(message),message};
  }
- if(action==='notice')return {ok:false,error:'Envio de Group Notice ainda não implementado nesta biblioteca; nenhum notice foi enviado.'};
+ if(action==='notice'){
+  const groupID=safe(p.groupID), subject=String(p.subject||'').trim(), message=String(p.text||p.message||'').trim();
+  if(!UUID.test(groupID))throw Error('UUID do grupo inválido');
+  if(!subject||subject.length>120)throw Error('Assunto obrigatório (máximo 120 caracteres)');
+  if(!message||message.length>900)throw Error('Mensagem obrigatória (máximo 900 caracteres)');
+  // Use only a native Group Notice API, never group chat or a fabricated IM packet.
+  const group=bot?.clientCommands?.group||bot?.clientCommands?.groups;
+  const names=['sendGroupNotice','sendNotice','createGroupNotice','postGroupNotice'];
+  const name=names.find(k=>typeof group?.[k]==='function');
+  if(!name){
+   const available=group?Object.getOwnPropertyNames(Object.getPrototypeOf(group)).filter(k=>/notice|group/i.test(k)).slice(0,40):[];
+   console.warn('[Notice] API de notice ausente. Métodos do grupo:',available);
+   return {ok:false,error:'A biblioteca instalada não expõe um método de envio de Group Notice. Nenhum notice foi enviado.',diagnostic:{groupMethods:available}};
+  }
+  try{
+   // The library's group commands accept UUID objects for group IDs.
+   const UUIDClass=require('@caspertech/node-metaverse').UUID;
+   await group[name](new UUIDClass(groupID),subject,message);
+   console.log(`[Notice] Chamada ${name} concluída para ${groupID}; publicação ainda não confirmada.`);
+   return {ok:true,confirmed:false,message:`Solicitação de notice enviada por ${name}. Confira a aba Notices do grupo no Firestorm.`};
+  }catch(e){console.error('[Notice] Falha:',e);return {ok:false,error:`Falha ao solicitar notice via ${name}: ${e.message||e}`};}
+ }
  if(action==='hud'){
   const index=Number(p.index);const d=state.dialogs[index];
   if(!Number.isInteger(index)||!d)throw Error('Diálogo não encontrado ou expirado');
