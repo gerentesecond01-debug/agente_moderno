@@ -466,15 +466,49 @@ async function sendGroupChatByAdmin(groupText,messageText){
  throw Error('A biblioteca instalada nao oferece envio de chat de grupo por metodo conhecido. Nenhuma mensagem foi enviada.');
 }
 async function groupDiagnosticCommand(){ return JSON.stringify(groupProtocolDiagnostic.report(bot,groupMembership)); }
+// Resolve a identidade do avatar DA SESSAO deste processo (BOT_ID), nunca a do administrador.
+// A biblioteca 0.8.22 pode armazenar a UUID como UUID, string ou objeto aninhado.
+function resolveOwnAvatarID(loginResult){
+ const sources=[
+  ['login.agentID',loginResult?.agentID],['login.agentId',loginResult?.agentId],
+  ['login.agent_id',loginResult?.agent_id],['login.agent.id',loginResult?.agent?.id],
+  ['bot.agentID',bot?.agentID],['bot.agentId',bot?.agentId],
+  ['bot.agent.agentID',bot?.agent?.agentID],['bot.agent.agentId',bot?.agent?.agentId],
+  ['bot.agent.id',bot?.agent?.id],['bot.agent.uuid',bot?.agent?.uuid],
+  ['bot.clientCommands.agent.agentID',bot?.clientCommands?.agent?.agentID],
+  ['bot.clientCommands.agent.agentId',bot?.clientCommands?.agent?.agentId],
+  ['bot.clientCommands.agent.agent.id',bot?.clientCommands?.agent?.agent?.id],
+  ['bot.currentRegion.agent.agentID',bot?.currentRegion?.agent?.agentID],
+  ['bot.currentRegion.agent.agentId',bot?.currentRegion?.agent?.agentId],
+  ['bot.currentRegion.agent.id',bot?.currentRegion?.agent?.id],
+  ['bot.loginResponse.agentID',bot?.loginResponse?.agentID],
+  ['bot.loginResponse.agent_id',bot?.loginResponse?.agent_id],
+  ['cached.botUUID',botUUID]
+ ];
+ for(const [source,value] of sources){
+  if(value===null||value===undefined)continue;
+  const options=[value,value?.toString?.(),value?.id,value?.uuid,value?.value,value?.UUID];
+  for(const candidate of options){
+   const id=String(candidate??'').trim();
+   if(/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(id)&&id!=='00000000-0000-0000-0000-000000000000'){
+    if(botUUID!==id)console.log('[Grupos] Identidade do avatar conectado obtida de '+source+' (BOT_ID='+BOT_ID+').');
+    botUUID=id;
+    return id;
+   }
+  }
+ }
+ console.warn('[Grupos] UUID nao encontrado na sessao do BOT_ID='+BOT_ID+'. Fontes verificadas: '+sources.filter(([k,v])=>v!==null&&v!==undefined).map(([k])=>k).join(', '));
+ return null;
+}
 async function listGroupsByAdminCommand(){
  // API confirmada no diagnostico da biblioteca 0.8.22:
  // clientCommands.agent.getAvatarGroups(avatarID).
  const agent=bot?.clientCommands?.agent;
  if(typeof agent?.getAvatarGroups!=='function')
   return 'Consulta indisponivel: agent.getAvatarGroups nao existe nesta sessao.';
- const avatarID=String(botUUID||bot?.agentID||bot?.agent?.agentID||'').trim();
- if(!/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(avatarID))
-  return 'Consulta indisponivel: UUID do proprio avatar ainda nao foi identificado.';
+ const avatarID=resolveOwnAvatarID();
+ if(!avatarID)
+  return 'UUID do avatar conectado nao localizado. Consulte os logs [Grupos] no Render para identificar os campos disponiveis nesta sessao.';
  try{
   const result=await agent.getAvatarGroups(new nmv.UUID(avatarID));
   const count=groupMembership.capture(result,'agent.getAvatarGroups');
@@ -506,12 +540,12 @@ async function enterGroupByAdminCommand(groupText){
 }
 function isAllowedAdmin(e){ if(!cfg.features.onlyAllowedAdmins)return true; return getAdminIdentity(e).isAdmin; }
 function isTeleportAdmin(e){ return getAdminIdentity(e).isAdmin; }
-function iniciarConexaoBot(){ if(shuttingDown)return; slOnline=false; groupMembership.clear(); notifyParent('SL_CONNECTING',{botId:BOT_ID,phase:'connecting',reason:'Conectando ao Second Life...'}); console.log(`Tentando realizar login no Second Life para bot ${BOT_ID}...`); bot.login().then(r=>{ console.log('Login completo com sucesso!'); if(r&&r.agentID)botUUID=r.agentID.toString(); groupMembership.capture(r,'login'); return bot.connectToSim(); }).then(async()=>{
+function iniciarConexaoBot(){ if(shuttingDown)return; slOnline=false; groupMembership.clear(); notifyParent('SL_CONNECTING',{botId:BOT_ID,phase:'connecting',reason:'Conectando ao Second Life...'}); console.log(`Tentando realizar login no Second Life para bot ${BOT_ID}...`); bot.login().then(r=>{ console.log('Login completo com sucesso!'); resolveOwnAvatarID(r); groupMembership.capture(r,'login'); return bot.connectToSim(); }).then(async()=>{
  const primeiraConexao=!hasConnectedOnce;
  hasConnectedOnce=true;
  slOnline=true;
  notifyParent('SL_ONLINE',{botId:BOT_ID,region:currentRegionName()});
- console.log('Conectado ao simulador! O bot está ativo.');
+ console.log('Conectado ao simulador! O bot está ativo.'); resolveOwnAvatarID();
  for(const name of ['onAgentGroupDataUpdate','onAgentGroupData','onGroupDataUpdate','onGroupList','onGroupsUpdate'])assinarEvento(name,e=>{const count=groupMembership.capture(e,name);if(count)console.log('[Grupos] '+count+' grupos recebidos em '+name);});
  configurarMonitorDeConexao();
  configurarRotinasAutomaticas();
