@@ -209,7 +209,7 @@ function configurarMonitorDeConexao(){
  assinarEvento('onConnectionClosed',e=>tratarEventoDesconexao('conexão fechada',e));
  assinarEvento('onLogout',e=>tratarEventoDesconexao('logout detectado',e));
  assinarEvento('onClose',e=>tratarEventoDesconexao('conexão encerrada',e));
- assinarEvento('onAlertMessage',e=>{ confirmGroupEntryFromAlert(e); confirmGroupDepartureFromAlert(e); const msg=eventoTexto(e); console.log('[Alerta SL] '+msg); if(/RegionRestart|will restart|will be logged out|logged out/i.test(msg)&&!desconexaoDuranteTeleporte()){const fallback=String(cfg.home?.url||'');if(/^https:\/\/maps\.secondlife\.com\/secondlife\//i.test(fallback)&&slOnline){processTeleportUrl(fallback).then(x=>console.log('[Região reiniciando] Fuga para Home:',x)).catch(e=>{console.error('[Fuga] '+e.message);agendarReconexao('restart da região detectado',Number(process.env.SL_REGION_RECOVERY_DELAY_MS||90000))})}else agendarReconexao('restart da região detectado',Number(process.env.SL_REGION_RECOVERY_DELAY_MS||90000));} });
+ assinarEvento('onAlertMessage',e=>{ const msg=eventoTexto(e); console.log('[Alerta SL] '+msg); if(/RegionRestart|will restart|will be logged out|logged out/i.test(msg)&&!desconexaoDuranteTeleporte()){const fallback=String(cfg.home?.url||'');if(/^https:\/\/maps\.secondlife\.com\/secondlife\//i.test(fallback)&&slOnline){processTeleportUrl(fallback).then(x=>console.log('[Região reiniciando] Fuga para Home:',x)).catch(e=>{console.error('[Fuga] '+e.message);agendarReconexao('restart da região detectado',Number(process.env.SL_REGION_RECOVERY_DELAY_MS||90000))})}else agendarReconexao('restart da região detectado',Number(process.env.SL_REGION_RECOVERY_DELAY_MS||90000));} });
 }
 function agendarReconexao(reason,delayMs){
  if(shuttingDown)return;
@@ -266,39 +266,6 @@ function getAdminIdentity(e){ const n=String((e&&e.fromName)||'').toLowerCase().
 // Falha segura: nunca aceita se o valor da taxa nao estiver confirmado.
 const recentGroupInvites = new Map();
 const pendingGroupInvites = new Map(); // convite -> dados, expira em 10 minutos
-
-// Confirmacoes de entrada: nunca confundir IM35 enviado com entrada efetiva.
-const pendingGroupEntries = new Map();
-function notifyGroupAdmins(message){
- const ids=[...new Set((cfg.security?.allowedAdminUUIDs||[]).map(uuidText).filter(Boolean))];
- for(const id of ids) bot.clientCommands?.comms?.sendInstantMessage(new nmv.UUID(id),message).catch(err=>console.warn('[Grupo] IM ao administrador falhou:',err.message||err));
-}
-function confirmGroupEntryFromAlert(event){
- const msg=eventoTexto(event);
- const raw=JSON.stringify(event||{});
- // Somente confirmacoes explicitas de ingresso, nunca 'invitation accepted' ou 'request sent'.
- if(!/GroupJoin|GroupJoined|You have joined the group|You are now a member of/i.test(raw))return;
- const nameMatch=msg.match(/(?:You have joined the group|You are now a member of)\s+['“]?([^'”\n.]+)['”]?/i);
- const groupName=nameMatch?nameMatch[1].trim():'';
- const eventGroupID=inviteField(event,['groupID','GroupID','groupId']);
- const matches=[...pendingGroupEntries.values()].filter(p=>Date.now()-p.sentAt<120000 && (!eventGroupID||p.groupID===eventGroupID));
- if(matches.length!==1){console.log('[Grupo] Alerta de entrada recebido, mas grupo pendente nao identificado de forma unica.');return;}
- const pending=matches[0];
- pendingGroupEntries.delete(pending.groupID);
- const message=`✅ Sucesso! Entrei no grupo ${groupName||pending.groupID}.`;
- console.log('[Grupo] Entrada confirmada pelo Second Life:',pending.groupID,groupName);
- if(pending.waiters.length){for(const resolve of pending.waiters)resolve(message);}
- else notifyGroupAdmins(message);
-}
-function waitForGroupEntry(groupID){
- const pending=pendingGroupEntries.get(groupID);
- if(!pending)return Promise.resolve('⚠️ Nao ha aceite pendente para este grupo.');
- return new Promise(resolve=>{
-  const timer=setTimeout(()=>resolve(`⚠️ Aceite enviado para ${groupID}, mas nao recebi confirmacao de entrada em 15 segundos.`),15000);
-  pending.waiters.push(message=>{clearTimeout(timer);resolve(message);});
- });
-}
-
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 function uuidText(v) { try { const s = String(v == null ? '' : v).trim().toLowerCase(); return UUID_RE.test(s) ? s : ''; } catch (_) { return ''; } }
@@ -390,7 +357,6 @@ async function sendGroupInvitationAccept({groupID,invitationID,fee}) {
   await comms.sendInstantMessage(groupUUID,'');
   if(!changed) throw Error('A biblioteca não passou o pacote IM pelo circuito interceptado.');
   recentGroupInvites.set(dedupeKey,Date.now());
-  pendingGroupEntries.set(groupID,{groupID,sentAt:Date.now(),waiters:[]});
   console.log(`[Grupo] IM35 enviado para ${groupID}; envio não comprova associação ao grupo.`);
   return true;
  }catch(err){
@@ -401,47 +367,16 @@ async function sendGroupInvitationAccept({groupID,invitationID,fee}) {
 
 // Gerenciamento de grupos. Somente chamadas comprovadamente disponíveis na biblioteca.
 function groupCommands(){return bot?.clientCommands?.group || bot?.clientCommands?.groups || null;}
-// A saída é confirmada pelo alerta GroupDepart do Second Life, não pelo retorno do método.
-// Apenas uma saída por vez: o alerta não contém UUID do grupo.
-let pendingGroupDeparture = null;
-function confirmGroupDepartureFromAlert(event){
- const pending=pendingGroupDeparture;
- if(!pending)return;
- const msg=eventoTexto(event);
- const raw=JSON.stringify(event||{});
- const isDepart=/GroupDepart/i.test(raw) || /You have left the group/i.test(msg);
- if(!isDepart)return;
- const match=msg.match(/You have left the group\s+['“]?([^'”]+)['”]?/i);
- const groupName=match?match[1].trim():'';
- pending.finish({ok:true,groupName});
-}
 async function leaveGroupByAdminCommand(groupText){
  const id=normalizeUUID(groupText,'UUID do grupo');
  const g=groupCommands();
- if(!g)return 'Saída indisponível: biblioteca sem comandos de grupos.';
- if(pendingGroupDeparture)return 'Já estou aguardando a confirmação de outra saída de grupo. Tente novamente em alguns segundos.';
+ if(!g)return 'Saida nao disponivel: biblioteca sem comandos de grupos.';
  const method=['leaveGroup','leave','leaveGroupByID','resignFromGroup'].find(k=>typeof g[k]==='function');
- if(!method)return 'Saída indisponível nesta versão da biblioteca. Nenhuma operação foi enviada.';
- let finish;
- const confirmed=new Promise(resolve=>{
-  let completed=false;
-  finish=result=>{if(completed)return;completed=true;clearTimeout(timer);if(pendingGroupDeparture?.finish===finish)pendingGroupDeparture=null;resolve(result);};
-  const timer=setTimeout(()=>finish({ok:false,timeout:true}),15000);
- });
- pendingGroupDeparture={groupID:id,finish};
- try{
-  await g[method](new nmv.UUID(id));
-  console.log(`[Grupo] Saída solicitada de ${id} via ${method}; aguardando GroupDepart.`);
- }catch(err){
-  finish({ok:false,error:String(err.message||err)});
- }
- const result=await confirmed;
- if(result.ok){
-  console.log(`[Grupo] Saída confirmada pelo Second Life: ${id} (${result.groupName||'nome não informado'}).`);
-  return `✅ Sucesso! Saí do grupo ${result.groupName||id}.`;
- }
- if(result.error)return `❌ Não foi possível sair do grupo: ${result.error}`;
- return `⚠️ Solicitei a saída de ${id}, mas não recebi confirmação do Second Life em 15 segundos. Confira se ainda estou no grupo.`;
+ if(!method)return 'Saida nao disponivel nesta versao da biblioteca. Nenhuma operacao foi enviada.';
+ try {await g[method](new nmv.UUID(id));
+  console.log(`[Grupo] Saida solicitada de ${id} via ${method}.`);
+  return `Saida solicitada para ${id}. Confira a lista de membros; ainda nao foi confirmada.`;
+ }catch(err){console.error('[Grupo] Falha ao sair:',err.message||err);return `Falha ao sair do grupo: ${err.message||err}`;}
 }
 async function listGroupsByAdminCommand(){
  const g=groupCommands();
@@ -469,9 +404,9 @@ async function enterGroupByAdminCommand(groupText){
  // Se o convite ja foi respondido automaticamente, nao o reenvie.
  const key=`${pending.groupID}:${pending.invitationID}`;
  if(recentGroupInvites.has(key) && Date.now()-recentGroupInvites.get(key)<120000)
-  return await waitForGroupEntry(groupID);
+  return `O aceite para ${groupID} ja foi enviado automaticamente. Confira a lista de membros do grupo; envio nao garante ingresso.`;
  const ok=await sendGroupInvitationAccept(pending);
- return ok ? await waitForGroupEntry(groupID) : `Convite recebido para ${groupID}, mas o pacote de aceite nao passou na validacao. Veja os logs [Grupo].`;
+ return ok ? `Resposta de aceite enviada para ${groupID}. Confira a lista de membros: ainda nao tenho confirmacao de entrada.` : `Convite recebido para ${groupID}, mas o pacote de aceite nao passou na validacao. Veja os logs [Grupo].`;
 }
 function isAllowedAdmin(e){ if(!cfg.features.onlyAllowedAdmins)return true; return getAdminIdentity(e).isAdmin; }
 function isTeleportAdmin(e){ return getAdminIdentity(e).isAdmin; }
