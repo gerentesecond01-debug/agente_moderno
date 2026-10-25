@@ -309,22 +309,57 @@ async function handleAuthorizedGroupInvitation(e) {
 
 async function sendGroupInvitationAccept({groupID,invitationID,fee}) {
  const dedupeKey=`${groupID}:${invitationID}`;
- if(recentGroupInvites.has(dedupeKey) && Date.now()-recentGroupInvites.get(dedupeKey)<120000) return false;
+ if(recentGroupInvites.has(dedupeKey) && Date.now()-recentGroupInvites.get(dedupeKey)<120000) return true;
  try {
-  // Nunca enviar ImprovedInstantMessage incompleto: o circuito retransmite
-  // pacotes invalidos e pode encerrar o processo por EstateID ausente.
-  const commands=bot.clientCommands || {};
-  const groupCommands=commands.group || commands.groups;
-  if(!groupCommands || typeof groupCommands.acceptInvitation !== 'function') {
-   console.warn('[Grupo] Convite recebido, mas aceite nao enviado: esta versao da biblioteca nao oferece acceptInvitation.');
-   return false;
+  const groupCommands=bot.clientCommands?.group || bot.clientCommands?.groups;
+  if(groupCommands && typeof groupCommands.acceptInvitation==='function') {
+   await groupCommands.acceptInvitation(new nmv.UUID(groupID),new nmv.UUID(invitationID));
+  } else {
+   // Pacote Second Life: ImprovedInstantMessage, Dialog=35, ToAgentID=grupo,
+   // ID=identificador original do convite. Construção independente do BotCore5.
+   // IMPORTANTE: pré-validar serialização antes de enviar ao circuito confiável:
+   // um pacote incompleto causa retransmissões e pode derrubar o Agent.
+   const {ImprovedInstantMessageMessage}=require('@caspertech/node-metaverse/dist/lib/classes/messages/ImprovedInstantMessage.js');
+   const {PacketFlags}=require('@caspertech/node-metaverse/dist/lib/enums/PacketFlags.js');
+   const {Utils}=require('@caspertech/node-metaverse/dist/lib/classes/Utils.js');
+   const circuit=bot.currentRegion?.circuit;
+   const agent=bot.agent;
+   if(!circuit || !agent?.agentID || !circuit.sessionID) throw Error('Circuito ou sessão não disponíveis.');
+   const zero=new nmv.UUID('00000000-0000-0000-0000-000000000000');
+   const packet=new ImprovedInstantMessageMessage();
+   const agentData={AgentID:agent.agentID,SessionID:circuit.sessionID};
+   const messageBlock={
+    FromGroup:false,ToAgentID:new nmv.UUID(groupID),ParentEstateID:0,
+    RegionID:zero,Position:new nmv.Vector3([0,0,0]),Offline:0,
+    Dialog:35,ID:new nmv.UUID(invitationID),Timestamp:0,
+    FromAgentName:Utils.StringToBuffer(''),Message:Utils.StringToBuffer(''),
+    BinaryBucket:Buffer.from([0])
+   };
+   // O gerador de mensagens da biblioteca pode exigir blocos como objetos ou listas.
+   // A variante só é usada se a serialização prévia funcionar.
+   let ready=false;
+   const failures=[];
+   for(const arrays of [false,true]) {
+    packet.AgentData=arrays?[agentData]:agentData;
+    packet.MessageBlock=arrays?[messageBlock]:messageBlock;
+    try {
+     if(typeof packet.writeToBuffer!=='function') throw Error('writeToBuffer indisponível');
+     const buf=Buffer.alloc(65536);
+     packet.writeToBuffer(buf,0);
+     ready=true;
+     console.log(`[Grupo] Pacote IM35 validado (${arrays?'blocos em listas':'blocos em objetos'}).`);
+     break;
+    } catch(error) {failures.push(error.message||String(error));}
+   }
+   if(!ready) throw Error('Pacote não passou na validação local: '+failures.join(' | '));
+   const seq=circuit.sendMessage(packet,PacketFlags.Reliable);
+   if(typeof circuit.waitForAck==='function') await circuit.waitForAck(seq,10000);
   }
-  await groupCommands.acceptInvitation(new nmv.UUID(groupID),new nmv.UUID(invitationID));
   recentGroupInvites.set(dedupeKey,Date.now());
-  console.log(`[Grupo] Resposta enviada: grupo=${groupID}; verificar membros no Second Life.`);
+  console.log(`[Grupo] Aceite IM35 transmitido para ${groupID}; aguardando confirmação da associação.`);
   return true;
  } catch(err) {
-  console.error('[Grupo] Falha no aceite:',err?.stack || err);
+  console.error('[Grupo] Aceite não enviado:',err.message||err);
   return false;
  }
 }
@@ -344,7 +379,7 @@ async function enterGroupByAdminCommand(groupText){
  if(recentGroupInvites.has(key) && Date.now()-recentGroupInvites.get(key)<120000)
   return `O aceite para ${groupID} ja foi enviado automaticamente. Confira a lista de membros do grupo; envio nao garante ingresso.`;
  const ok=await sendGroupInvitationAccept(pending);
- return ok ? `Aceite enviado para ${groupID}. Verifique a lista de membros.` : `Convite recebido para ${groupID}, mas a biblioteca nao suporta o aceite nesta versao. Nenhuma entrada foi confirmada.`;
+ return ok ? `Resposta de aceite enviada para ${groupID}. Confira a lista de membros: ainda nao tenho confirmacao de entrada.` : `Convite recebido para ${groupID}, mas o pacote de aceite nao passou na validacao. Veja os logs [Grupo].`;
 }
 function isAllowedAdmin(e){ if(!cfg.features.onlyAllowedAdmins)return true; return getAdminIdentity(e).isAdmin; }
 function isTeleportAdmin(e){ return getAdminIdentity(e).isAdmin; }
