@@ -361,6 +361,32 @@ async function sendGroupInvitationAccept({groupID,invitationID,fee}) {
  }finally{restore();}
 }
 
+// Gerenciamento de grupos. Somente chamadas comprovadamente disponíveis na biblioteca.
+function groupCommands(){return bot?.clientCommands?.group || bot?.clientCommands?.groups || null;}
+async function leaveGroupByAdminCommand(groupText){
+ const id=normalizeUUID(groupText,'UUID do grupo');
+ const g=groupCommands();
+ if(!g)return 'Saida nao disponivel: biblioteca sem comandos de grupos.';
+ const method=['leaveGroup','leave','leaveGroupByID','resignFromGroup'].find(k=>typeof g[k]==='function');
+ if(!method)return 'Saida nao disponivel nesta versao da biblioteca. Nenhuma operacao foi enviada.';
+ try {await g[method](new nmv.UUID(id));
+  console.log(`[Grupo] Saida solicitada de ${id} via ${method}.`);
+  return `Saida solicitada para ${id}. Confira a lista de membros; ainda nao foi confirmada.`;
+ }catch(err){console.error('[Grupo] Falha ao sair:',err.message||err);return `Falha ao sair do grupo: ${err.message||err}`;}
+}
+async function listGroupsByAdminCommand(){
+ const g=groupCommands();
+ if(!g)return 'Lista indisponivel: biblioteca sem comandos de grupos.';
+ const method=['getCurrentGroups','getGroups','getGroupList','listGroups'].find(k=>typeof g[k]==='function');
+ if(!method)return 'Esta versao da biblioteca nao disponibiliza consulta de grupos.';
+ try {
+  const result=await g[method]();
+  const entries=Array.isArray(result)?result:Array.isArray(result?.groups)?result.groups:Array.isArray(result?.Groups)?result.Groups:[];
+  if(!entries.length)return 'A consulta nao retornou grupos (isso nao confirma que o avatar esteja sem grupos).';
+  const rows=entries.slice(0,20).map(item=>`${String(item.name||item.Name||item.groupName||'Grupo')} (${String(item.id||item.ID||item.groupID||item.GroupID||'UUID indisponivel')})`);
+  return `Grupos (${entries.length}): ${rows.join('; ')}`.slice(0,900);
+ }catch(err){return `Erro ao consultar grupos: ${err.message||err}`;}
+}
 // O comando por IM usa UUID do remetente, nao nome de exibicao.
 // UUID de grupo sozinho nao e autorizacao de ingresso no Second Life.
 async function enterGroupByAdminCommand(groupText){
@@ -433,15 +459,21 @@ function configurarRotinasAutomaticas(){ limparRotinasAutomaticas(); if(cfg.feat
  bot.clientEvents.onInstantMessage.subscribe(async e=>{ try{
  const commandText=String(e.message||'').trim();
  if(botUUID&&e.from.toString()===botUUID)return;
- const groupCommand=String(e.message||'').trim().match(/^!entrar\s*grupo\s+([0-9a-f-]{36})\s*$/i);
+ const groupCommand=commandText.match(/^!(entrar\s*grupo|sair\s*grupo|listar\s*grupos)(?:\s+([0-9a-f-]{36}))?\s*$/i);
  if(groupCommand){
   const sender=uuidText(e.from);
   const admins=(cfg.security?.allowedAdminUUIDs||[]).map(uuidText).filter(Boolean);
   if(!sender || !admins.includes(sender)){
-   console.warn('[Seguranca] !entrargrupo negado: UUID do remetente nao esta na lista de administradores.');
+   console.warn('[Seguranca] Comando de grupo negado: remetente nao e admin UUID autorizado.');
    return;
   }
-  const answer=await enterGroupByAdminCommand(groupCommand[1]);
+  const action=groupCommand[1].replace(/\s+/g,'').toLowerCase();
+  const groupID=groupCommand[2];
+  let answer;
+  if(action==='listargrupos') answer=await listGroupsByAdminCommand();
+  else if(!groupID)answer=`Uso: !${action} UUID_DO_GRUPO`;
+  else if(action==='sairgrupo')answer=await leaveGroupByAdminCommand(groupID);
+  else answer=await enterGroupByAdminCommand(groupID);
   await bot.clientCommands.comms.sendInstantMessage(e.from,answer);
   return;
  }
@@ -507,7 +539,7 @@ function agendarAutoSitNaRegiao(destino,uuid){
  setTimeout(tentar,Number(process.env.HOME_SIT_DELAY_MS||10000));
 }
 async function goHomeFromConfig(){ try{ if(!cfg.home||!cfg.home.url){ console.log('[Home] URL da ilha não configurada.'); return 'URL da ilha não configurada.'; } const msg=await processTeleportUrl(cfg.home.url); console.log('[Home] '+msg); if(cfg.home.autoSit&&cfg.home.objectUUID)agendarAutoSitNaRegiao(); return msg+' Aguardando chegar na região para sentar no objeto configurado.'; }catch(err){ console.error('[Home] Erro:',err.message||err); return 'Erro no home: '+(err.message||err); } }
-async function processCommand(message){ let text=message.trim(); if(text.startsWith('!'))text=text.slice(1).trim(); if(text.length===0)return 'comando vazio'; const pieces=text.includes('|')?text.split('|'):text.split(/\s+/); const command=(pieces.shift()||'').trim().toLowerCase(); const args=pieces.map(i=>i.trim()).filter(Boolean); switch(command){ case 'help':case 'ajuda':return '!status | !home | !tp LINK | !invite AVATAR_UUID [GRUPO_UUID] [ROLE_UUID] | !sit UUID | !stand | !sitground | !say [canal] texto | !attach item ponto | !detach item'; case 'status':return `online. bot=${BOT_ID}. região=${(bot.currentRegion&&bot.currentRegion.regionName)||'desconhecida'}. RLV_TP=${rlvRestricoes.bloquearTeleporte?'Bloqueado':'Livre'}`; case 'home':return await goHomeFromConfig(); case 'tp':case 'teleport':if(!args.length)throw new Error('Link ausente'); return await processTeleportUrl(args.join(' ')); case 'sit':case 'sentar':if(!args.length||args[0].length<32)throw new Error('uso: !sit UUID'); await bot.clientCommands.movement.sitOnObject(new nmv.UUID(args[0]),new nmv.Vector3([0,0,0])); return `Comando sit enviado para ${args[0]}`; case 'stand':case 'levantar':bot.clientCommands.movement.stand(); return 'stand enviado'; case 'sitground':bot.clientCommands.movement.sitOnGround(); return 'sit ground enviado'; case 'invite':case 'convidar':case 'groupinvite':if(!args.length)throw new Error('Uso: !invite AVATAR_UUID [GRUPO_UUID] [ROLE_UUID]'); return await sendGroupInviteFromConfig({avatarID:args[0],groupID:args[1],roleID:args[2]}); case 'say':case 'falar':{ if(!args.length)throw new Error('Texto ausente'); let channel=0, sayText=args.join(' '); if(args.length>=2&&/^-?\d+$/.test(args[0])){ channel=Number.parseInt(args[0],10); sayText=args.slice(1).join(' '); } await bot.clientCommands.comms.say(sayText,channel); return `chat enviado no canal ${channel}`;} case 'attach':case 'wear':case 'vestir':{ if(!args.length)throw new Error('Uso: !attach nomeDoItem [AttachmentPoint]'); const item=await findInventoryItem(args[0]); await item.attachToAvatar(parseAttachmentPoint(args[1]||'Default')); return `attach enviado: ${item.name}`;} case 'detach':case 'tirar':{ if(!args.length)throw new Error('Uso: !detach nomeDoItem'); const item=await findInventoryItem(args[0]); await item.detachFromAvatar(); return `detach enviado: ${item.name}`;} default:throw new Error(`comando desconhecido: ${command}. use !help`); } }
+async function processCommand(message){ let text=message.trim(); if(text.startsWith('!'))text=text.slice(1).trim(); if(text.length===0)return 'comando vazio'; const pieces=text.includes('|')?text.split('|'):text.split(/\s+/); const command=(pieces.shift()||'').trim().toLowerCase(); const args=pieces.map(i=>i.trim()).filter(Boolean); switch(command){ case 'help':case 'ajuda':return '!entrargrupo UUID | !sairgrupo UUID | !listargrupos | !status | !home | !tp LINK | !invite AVATAR_UUID [GRUPO_UUID] [ROLE_UUID] | !sit UUID | !stand | !sitground | !say [canal] texto | !attach item ponto | !detach item'; case 'status':return `online. bot=${BOT_ID}. região=${(bot.currentRegion&&bot.currentRegion.regionName)||'desconhecida'}. RLV_TP=${rlvRestricoes.bloquearTeleporte?'Bloqueado':'Livre'}`; case 'home':return await goHomeFromConfig(); case 'tp':case 'teleport':if(!args.length)throw new Error('Link ausente'); return await processTeleportUrl(args.join(' ')); case 'sit':case 'sentar':if(!args.length||args[0].length<32)throw new Error('uso: !sit UUID'); await bot.clientCommands.movement.sitOnObject(new nmv.UUID(args[0]),new nmv.Vector3([0,0,0])); return `Comando sit enviado para ${args[0]}`; case 'stand':case 'levantar':bot.clientCommands.movement.stand(); return 'stand enviado'; case 'sitground':bot.clientCommands.movement.sitOnGround(); return 'sit ground enviado'; case 'invite':case 'convidar':case 'groupinvite':if(!args.length)throw new Error('Uso: !invite AVATAR_UUID [GRUPO_UUID] [ROLE_UUID]'); return await sendGroupInviteFromConfig({avatarID:args[0],groupID:args[1],roleID:args[2]}); case 'say':case 'falar':{ if(!args.length)throw new Error('Texto ausente'); let channel=0, sayText=args.join(' '); if(args.length>=2&&/^-?\d+$/.test(args[0])){ channel=Number.parseInt(args[0],10); sayText=args.slice(1).join(' '); } await bot.clientCommands.comms.say(sayText,channel); return `chat enviado no canal ${channel}`;} case 'attach':case 'wear':case 'vestir':{ if(!args.length)throw new Error('Uso: !attach nomeDoItem [AttachmentPoint]'); const item=await findInventoryItem(args[0]); await item.attachToAvatar(parseAttachmentPoint(args[1]||'Default')); return `attach enviado: ${item.name}`;} case 'detach':case 'tirar':{ if(!args.length)throw new Error('Uso: !detach nomeDoItem'); const item=await findInventoryItem(args[0]); await item.detachFromAvatar(); return `detach enviado: ${item.name}`;} default:throw new Error(`comando desconhecido: ${command}. use !help`); } }
 async function boot(){ if(!BOT_ID)throw new Error('BOT_ID ausente. Inicie pelo Agent.'); cfg=loadRuntimeConfig(); if(!cfg)throw new Error(`Configuração do bot ${BOT_ID} ausente.`); validarCredenciais(); loginParameters=makeLoginParameters(true); bot=new nmv.Bot(loginParameters,options); iniciarConexaoBot(); }
 boot().catch(err=>{ console.error('Erro ao iniciar bot:',err.message||err); process.exit(1); });
 process.on('message',async message=>{ try{ if(!message)return; if(!bot||!bot.clientCommands||!slOnline)throw new Error('Bot ainda não está online no Second Life.'); if(message.type==='TELEPORT'){const result=await processTeleportUrl(String(message.payload?.destination||''));console.log('[Teleporte programado] '+result);if(message.payload?.autoSit&&message.payload?.objectUUID)agendarAutoSitNaRegiao(String(message.payload.destination),String(message.payload.objectUUID));return;} if(message.type==='GROUP_INVITE'){ const result=await sendGroupInviteFromConfig(message.payload||{}); console.log(`[Grupo] ${result}`); return; } if(message.type==='GO_HOME'){ const result=await goHomeFromConfig(); console.log(`[Home] ${result}`); return; } }catch(err){ console.error('[Comando] Erro:',err.message||err); } });
