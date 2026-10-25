@@ -14,11 +14,11 @@ if(!MASTER_URL||/SEU-MASTER/i.test(MASTER_URL))console.warn('⚠️ Edite master
 const app=express();app.use(express.json({limit:'512kb'}));
 let child=null,currentConfig=null,logs=[],pendingMasterLog='';
 let desiredRunning=false;
-let stopPromise=null;
 let recoveryTimer=null;
-let recoveryGeneration=0;
-let recoveryBusy=false;
-function cancelRecovery(){ recoveryGeneration++; if(recoveryTimer){clearTimeout(recoveryTimer);recoveryTimer=null;} }
+let recoveryEpoch=0;
+let watchdogBusy=false;
+function cancelPendingRecovery(){recoveryEpoch++;if(recoveryTimer){clearTimeout(recoveryTimer);recoveryTimer=null;}}
+let stopPromise=null;
 let lastChildHeartbeat=0, recoveryCount=0, watchdogRestarts=0, lastRecoveryAt=null;
 // Proteção contra loop interno da Event Queue do node-metaverse.
 let eventQueueFailures=[];
@@ -70,12 +70,13 @@ function start(config){
    if(child===thisChild)child=null;
    setStatus({running:false,online:false,phase:'offline',pid:null,lastReason:`Processo finalizado código ${c}${signal?` (${signal})`:''}`});
    // Só tenta religar se o painel ainda deseja o bot online.
-   if(desiredRunning && !stopPromise && !recoveryBusy) scheduleRecovery(8000,'queda inesperada');
+   if(desiredRunning){const epoch=recoveryEpoch;recoveryTimer=setTimeout(()=>{recoveryTimer=null;if(epoch!==recoveryEpoch||!desiredRunning||child||stopPromise)return;bootstrap(true).catch(e=>addLog('Bootstrap após queda: '+e.message))},8000);}
  });
  return {ok:true,message:'Bot ligado.'};
 }
 async function stop(){
  desiredRunning=false;
+ cancelPendingRecovery();
  if(stopPromise)return stopPromise;
  if(!child){setStatus({running:false,online:false,phase:'offline',pid:null,lastReason:'Desligado pelo painel'});return {ok:true,message:'Bot já está desligado.'}}
  const c=child;
@@ -91,30 +92,18 @@ async function stop(){
  });
  return stopPromise;
 }
-function scheduleRecovery(delay,reason){
-  if(!desiredRunning || recoveryTimer || stopPromise || child)return;
-  const generation=recoveryGeneration;
-  addLog(`Recuperação agendada (${reason}) em ${Math.round(delay/1000)}s`);
-  recoveryTimer=setTimeout(async()=>{
-    recoveryTimer=null;
-    if(generation!==recoveryGeneration || !desiredRunning || child || stopPromise)return;
-    try{
-      // Consultar intenção atual do Master antes de iniciar após uma queda.
-      await poolSync(false);
-      if(generation!==recoveryGeneration || !desiredRunning || child || stopPromise)return;
-      start(currentConfig);
-    }catch(e){addLog('Recuperação: '+e.message);if(desiredRunning)scheduleRecovery(30000,'nova tentativa');}
-  },delay);
-}
-async function restart(config){await stop();if(config)currentConfig=config;return start(currentConfig)}
+async function restart(config){desiredRunning=false;await stop();if(config)currentConfig=config;return start(currentConfig)}
 async function watchdog(){
- if(!desiredRunning||!child||stopPromise||recoveryBusy)return;
+ if(!desiredRunning||!child||stopPromise||watchdogBusy)return;
  const age=Date.now()-lastChildHeartbeat;
  if(age<WATCHDOG_STALE_MS)return;
  watchdogRestarts++; recoveryCount++; lastRecoveryAt=new Date().toISOString();
  setStatus({phase:'recovering',online:false,lastReason:`Watchdog: processo sem resposta por ${Math.round(age/1000)}s`,watchdogRestarts,recoveryCount,lastRecoveryAt});
  addLog(`⚠️ Watchdog detectou processo sem resposta por ${Math.round(age/1000)}s. Recuperando...`);
- const cfg=currentConfig; await stop(); desiredRunning=true; setTimeout(()=>{try{start(cfg)}catch(e){addLog('Auto Recovery: '+e.message)}},5000);
+ watchdogBusy=true;
+ try{const cfg=currentConfig;await stop();await bootstrap(false);if(!desiredRunning)return;
+ const epoch=recoveryEpoch;recoveryTimer=setTimeout(()=>{recoveryTimer=null;if(epoch!==recoveryEpoch||!desiredRunning||child||stopPromise)return;try{start(cfg)}catch(e){addLog('Auto Recovery: '+e.message)}},5000);
+ }finally{watchdogBusy=false;}
 }
 function send(type,payload={}){if(!child)return {ok:false,error:'Bot desligado.'};if(!status.online)return {ok:false,error:`Bot ainda não está online. Status: ${status.phase}`};child.send({type,payload});addLog('📨 '+type);return {ok:true,message:'Comando enviado.'}}
 async function poolSync(autoStart=true){
