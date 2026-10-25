@@ -308,22 +308,24 @@ async function handleAuthorizedGroupInvitation(e) {
 }
 
 async function sendGroupInvitationAccept({groupID,invitationID,fee}) {
- const dedupeKey = `${groupID}:${invitationID}`;
- if (recentGroupInvites.has(dedupeKey) && Date.now()-recentGroupInvites.get(dedupeKey)<120000) return;
- recentGroupInvites.set(dedupeKey,Date.now());
+ const dedupeKey=`${groupID}:${invitationID}`;
+ if(recentGroupInvites.has(dedupeKey) && Date.now()-recentGroupInvites.get(dedupeKey)<120000) return false;
  try {
-  const groupCommands = bot.clientCommands.group || bot.clientCommands.groups;
-  if (groupCommands && typeof groupCommands.acceptInvitation === 'function') {
-   await groupCommands.acceptInvitation(new nmv.UUID(groupID),new nmv.UUID(invitationID));
-  } else {
-   // Nao construir ImprovedInstantMessage manualmente: a versao instalada
-   // exige campos internos adicionais e o circuito retransmite o pacote invalido.
-   throw new Error('Biblioteca sem metodo seguro acceptInvitation; pacote manual desativado para evitar queda do Agent.');
+  // Nunca enviar ImprovedInstantMessage incompleto: o circuito retransmite
+  // pacotes invalidos e pode encerrar o processo por EstateID ausente.
+  const commands=bot.clientCommands || {};
+  const groupCommands=commands.group || commands.groups;
+  if(!groupCommands || typeof groupCommands.acceptInvitation !== 'function') {
+   console.warn('[Grupo] Convite recebido, mas aceite nao enviado: esta versao da biblioteca nao oferece acceptInvitation.');
+   return false;
   }
-  console.log(`[Grupo] Pedido de aceite processado para ${groupID}; confirmar ingresso na lista de membros.`);
+  await groupCommands.acceptInvitation(new nmv.UUID(groupID),new nmv.UUID(invitationID));
+  recentGroupInvites.set(dedupeKey,Date.now());
+  console.log(`[Grupo] Resposta enviada: grupo=${groupID}; verificar membros no Second Life.`);
+  return true;
  } catch(err) {
-  recentGroupInvites.delete(dedupeKey);
-  console.error('[Grupo] Erro ao responder convite:',err.message||err);
+  console.error('[Grupo] Falha no aceite:',err?.stack || err);
+  return false;
  }
 }
 
@@ -341,8 +343,8 @@ async function enterGroupByAdminCommand(groupText){
  const key=`${pending.groupID}:${pending.invitationID}`;
  if(recentGroupInvites.has(key) && Date.now()-recentGroupInvites.get(key)<120000)
   return `O aceite para ${groupID} ja foi enviado automaticamente. Confira a lista de membros do grupo; envio nao garante ingresso.`;
- await sendGroupInvitationAccept(pending);
- return `Aceite solicitado para ${groupID}. Confira a lista de membros do grupo.`;
+ const ok=await sendGroupInvitationAccept(pending);
+ return ok ? `Aceite enviado para ${groupID}. Verifique a lista de membros.` : `Convite recebido para ${groupID}, mas a biblioteca nao suporta o aceite nesta versao. Nenhuma entrada foi confirmada.`;
 }
 function isAllowedAdmin(e){ if(!cfg.features.onlyAllowedAdmins)return true; return getAdminIdentity(e).isAdmin; }
 function isTeleportAdmin(e){ return getAdminIdentity(e).isAdmin; }
@@ -391,7 +393,7 @@ function configurarRotinasAutomaticas(){ limparRotinasAutomaticas(); if(cfg.feat
     console.error('[TP Offer] Erro ao aceitar Offer Teleport:',err.message||err);
   }
  });
- if(bot.clientEvents.onScriptDialog) bot.clientEvents.onScriptDialog.subscribe(d=>console.log(`[HUD Dialog] ${d.message}`));
+ if(bot.clientEvents.onScriptDialog) bot.clientEvents.onScriptDialog.subscribe(d=>console.log('[HUD Dialog]', {message:d?.message ?? null, buttons:d?.buttons ?? null, objectID:d?.objectID?.toString?.() ?? null}));
  if(bot.clientEvents.onGroupInvite && typeof bot.clientEvents.onGroupInvite.subscribe === 'function') {
   bot.clientEvents.onGroupInvite.subscribe(e => handleAuthorizedGroupInvitation(e).catch(err=>console.error('[Grupo] Erro no evento:',err.message||err)));
   console.log('[Grupo] Listener onGroupInvite registrado.');
