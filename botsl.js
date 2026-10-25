@@ -317,7 +317,27 @@ async function findInventoryItem(nameOrUUID){ const inv=await bot.clientCommands
 function parseAttachmentPoint(value){ const norm=value.toLowerCase().replace(/[^a-z0-9]/g,''); for(const key of Object.keys(AttachmentPoint).filter(k=>Number.isNaN(Number(k)))){ if(key.toLowerCase().replace(/[^a-z0-9]/g,'')===norm)return AttachmentPoint[key]; } throw new Error(`attachment point inválido: ${value}`); }
 function parseSlurl(raw){ const m=String(raw||'').match(/\/secondlife\/([^\/]+)\/([0-9.]+)\/([0-9.]+)\/([0-9.]+)/i); if(!m)throw new Error('envie o link maps.secondlife.com/secondlife/Regiao/X/Y/Z'); return { region:decodeURIComponent(m[1]), x:parseFloat(m[2]), y:parseFloat(m[3]), z:parseFloat(m[4]) }; }
 async function clearSitBeforeTeleport(){try{const movement=bot?.clientCommands?.movement;if(movement&&typeof movement.stand==='function'){await Promise.resolve(movement.stand());await new Promise(resolve=>setTimeout(resolve,700));}}catch(e){console.warn('[Teleporte] Não foi possível levantar antes do teleporte:',e.message||e)}}
-async function processTeleportUrl(raw){ if(rlvRestricoes.bloquearTeleporte)return 'Comando recusado: restrição RLV de teleporte ativa.'; const loc=parseSlurl(raw); await clearSitBeforeTeleport(); marcarJanelaDeTeleporte(`indo para ${loc.region}`,Number(process.env.SL_TELEPORT_GRACE_MS||60000)); if(bot.clientCommands&&bot.clientCommands.teleport&&typeof bot.clientCommands.teleport.teleportTo==='function')await bot.clientCommands.teleport.teleportTo(loc.region,new nmv.Vector3([loc.x,loc.y,loc.z]),new nmv.Vector3([loc.x,loc.y,loc.z])); else if(bot.client&&bot.client.self)bot.client.self.teleport(loc.region,new nmv.Vector3([loc.x,loc.y,loc.z])); return `Iniciando teleporte para: ${loc.region} (${loc.x}, ${loc.y}, ${loc.z})`; }
+let postureTeleportSequence=0;
+async function processTeleportUrl(raw, options={}){
+ if(rlvRestricoes.bloquearTeleporte)return 'Comando recusado: restrição RLV de teleporte ativa.';
+ const loc=parseSlurl(raw);
+ const sequence=++postureTeleportSequence;
+ await clearSitBeforeTeleport();
+ marcarJanelaDeTeleporte(`indo para ${loc.region}`,Number(process.env.SL_TELEPORT_GRACE_MS||60000));
+ if(bot.clientCommands?.teleport&&typeof bot.clientCommands.teleport.teleportTo==='function')await bot.clientCommands.teleport.teleportTo(loc.region,new nmv.Vector3([loc.x,loc.y,loc.z]),new nmv.Vector3([loc.x,loc.y,loc.z]));
+ else if(bot.client?.self)await Promise.resolve(bot.client.self.teleport(loc.region,new nmv.Vector3([loc.x,loc.y,loc.z])));
+ // Correção pós-teleporte apenas quando NÃO há Auto Sit configurado para esta viagem.
+ // Não mexer nas animações de outros avatares ou em animações que não controlamos.
+ if(!options.autoSit){
+   setTimeout(async()=>{
+     if(sequence!==postureTeleportSequence||!slOnline||shuttingDown||!bot)return;
+     if(currentRegionName().toLowerCase()!==loc.region.toLowerCase())return;
+     try{await Promise.resolve(bot.clientCommands?.movement?.stand?.());console.log('[Postura] Stand pós-teleporte enviado.');}
+     catch(err){console.warn('[Postura] Falha no stand pós-teleporte:',err.message||err);}
+   },3000);
+ }
+ return `Iniciando teleporte para: ${loc.region} (${loc.x}, ${loc.y}, ${loc.z})`;
+}
 function agendarAutoSitNaRegiao(destino,uuid){
  const obj=String(uuid||(cfg&&cfg.home&&cfg.home.objectUUID)||'').trim();
  const url=String(destino||(cfg&&cfg.home&&cfg.home.url)||'').trim();
