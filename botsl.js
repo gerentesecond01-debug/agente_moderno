@@ -276,59 +276,65 @@ function invitationFee(e) {
  const match = text.match(/(?:L\$|fee\s*[:=]\s*|taxa\s*[:=]\s*)([\d.,]+)/i);
  return match ? Number(match[1].replace(/,/g, '')) : null;
 }
+// O campo `from` em convites de grupo pode ser o UUID do GRUPO,
+// e nao o UUID de quem convidou. Nao confundir os dois.
+function inviteField(e, names) {
+ for (const n of names) {
+  const v = e && e[n];
+  const id = uuidText(v);
+  if (id) return id;
+ }
+ return '';
+}
 async function handleAuthorizedGroupInvitation(e) {
- const sender = uuidText(e.from || e.fromAgentID || e.FromAgentID || e.inviterID || e.inviterId);
- const groupID = uuidText(e.groupID || e.groupId || e.GroupID || e.groupUUID);
- const invitationID = uuidText(e.imSessionID || e.sessionID || e.invitationID || e.inviteID || e.ID);
+ const groupID = inviteField(e, ['groupID','groupId','GroupID','groupUUID','groupUUIDString','from']);
+ const invitationID = inviteField(e, ['imSessionID','sessionID','sessionId','invitationID','inviteID','ID']);
+ // Somente campos EXPLICITAMENTE atribuídos ao convidador; `from` é ambíguo.
+ const inviterID = inviteField(e, ['inviterID','inviterId','inviterUUID','inviterAgentID','invitedByID','invitedByUUID']);
  const fee = invitationFee(e);
- console.log(`[Grupo] Convite real recebido: remetente=${sender||'desconhecido'} grupo=${groupID||'desconhecido'} convite=${invitationID||'desconhecido'} taxa=${fee===null?'desconhecida':fee}`);
+ console.log(`[Grupo] Convite recebido: grupo=${groupID||'desconhecido'} convite=${invitationID||'desconhecido'} convidador=${inviterID||'nao informado'} taxa=${fee===null?'desconhecida':fee}`);
+ if (cfg.features?.autoAcceptGroups === false) { console.log('[Grupo] Autoaceite desativado.'); return; }
  const admins = (cfg.security?.allowedAdminUUIDs || []).map(uuidText).filter(Boolean);
- if (!sender || !admins.includes(sender)) { console.log('[Grupo] Ignorado: UUID do remetente nao autorizado.'); return; }
- if (cfg.features?.autoAcceptGroups === false) { console.log('[Grupo] Aceitacao automatica desativada.'); return; }
- if (fee === null || !Number.isFinite(fee)) { console.log('[Grupo] Nao aceito: taxa nao confirmada.'); return; }
- if (fee !== 0) { console.log(`[Grupo] Nao aceito: taxa L$${fee}.`); return; }
- if (!groupID || !invitationID) {
-  console.log('[Grupo] Dados insuficientes no evento. Campos recebidos: '+Object.keys(e||{}).join(', '));
+ if (!inviterID) {
+  console.warn('[Grupo] Convite nao aceito: evento informa o UUID do grupo, mas nao identifica de forma verificavel o avatar que convidou.');
+  console.log('[Grupo] Campos do evento: '+Object.keys(e||{}).join(', '));
   return;
  }
+ if (!admins.includes(inviterID)) { console.log('[Grupo] Convite ignorado: convidador nao autorizado.'); return; }
+ if (fee === null || !Number.isFinite(fee)) { console.log('[Grupo] Convite nao aceito: taxa nao confirmada.'); return; }
+ if (fee !== 0) { console.log(`[Grupo] Convite nao aceito: taxa L$${fee}.`); return; }
+ if (!groupID || !invitationID) { console.log('[Grupo] Convite incompleto; impossivel responder.'); return; }
  const dedupeKey = `${groupID}:${invitationID}`;
  if (recentGroupInvites.has(dedupeKey) && Date.now()-recentGroupInvites.get(dedupeKey)<120000) return;
- recentGroupInvites.set(dedupeKey, Date.now());
+ recentGroupInvites.set(dedupeKey,Date.now());
  try {
   const groupCommands = bot.clientCommands.group || bot.clientCommands.groups;
-  if (groupCommands && typeof groupCommands.acceptGroupInvite === 'function') {
-   await groupCommands.acceptGroupInvite(e);
-  } else if (groupCommands && typeof groupCommands.acceptInvitation === 'function') {
-   await groupCommands.acceptInvitation(new nmv.UUID(groupID), new nmv.UUID(invitationID));
+  if (groupCommands && typeof groupCommands.acceptInvitation === 'function') {
+   await groupCommands.acceptInvitation(new nmv.UUID(groupID),new nmv.UUID(invitationID));
   } else {
-   // Protocolo SL: resposta ImprovedInstantMessage Dialog=35, ID=UUID do convite.
    const { ImprovedInstantMessageMessage } = require('@caspertech/node-metaverse/dist/lib/classes/messages/ImprovedInstantMessage.js');
    const { PacketFlags } = require('@caspertech/node-metaverse/dist/lib/enums/PacketFlags.js');
    const { InstantMessageOnline } = require('@caspertech/node-metaverse/dist/lib/enums/InstantMessageOnline.js');
    const { Utils } = require('@caspertech/node-metaverse/dist/lib/classes/Utils.js');
-   const circuit = bot.currentRegion?.circuit;
-   const agent = bot.agent;
-   if (!circuit || !agent?.agentID || !circuit.sessionID) throw new Error('Circuito SL nao disponivel para resposta.');
-   const packet = new ImprovedInstantMessageMessage();
-   packet.AgentData = {AgentID: agent.agentID, SessionID: circuit.sessionID};
-   packet.MessageBlock = {
-    FromGroup: false, ToAgentID: new nmv.UUID(groupID), ParentEstateID: 0,
-    RegionID: nmv.UUID.zero(), Position: nmv.Vector3.getZero(),
-    Offline: InstantMessageOnline.Online, Dialog: 35, ID: new nmv.UUID(invitationID),
-    Timestamp: Math.floor(Date.now()/1000),
-    FromAgentName: Utils.StringToBuffer(`${agent.firstName} ${agent.lastName}`),
-    Message: Utils.StringToBuffer(''), BinaryBucket: Buffer.alloc(0)
-   };
-   packet.EstateBlock = {EstateID: 0};
-   const seq = circuit.sendMessage(packet, PacketFlags.Reliable);
-   await circuit.waitForAck(seq, 10000);
+   const circuit=bot.currentRegion?.circuit, agent=bot.agent;
+   if(!circuit||!agent?.agentID||!circuit.sessionID) throw new Error('Circuito indisponivel.');
+   const packet=new ImprovedInstantMessageMessage();
+   packet.AgentData={AgentID:agent.agentID,SessionID:circuit.sessionID};
+   packet.MessageBlock={FromGroup:false,ToAgentID:new nmv.UUID(groupID),ParentEstateID:0,
+    RegionID:nmv.UUID.zero(),Position:nmv.Vector3.getZero(),Offline:InstantMessageOnline.Online,
+    Dialog:35,ID:new nmv.UUID(invitationID),Timestamp:Math.floor(Date.now()/1000),
+    FromAgentName:Utils.StringToBuffer(`${agent.firstName} ${agent.lastName}`),
+    Message:Utils.StringToBuffer(''),BinaryBucket:Buffer.alloc(1)};
+   const seq=circuit.sendMessage(packet,PacketFlags.Reliable);
+   await circuit.waitForAck(seq,10000);
   }
-  console.log(`[Grupo] Aceite enviado ao simulador para grupo ${groupID}; aguardando confirmacao de entrada no viewer.`);
+  console.log(`[Grupo] Resposta de aceite enviada para ${groupID}; ainda requer confirmacao de membro.`);
  } catch(err) {
   recentGroupInvites.delete(dedupeKey);
-  console.error('[Grupo] Erro ao enviar aceite:',err.message||err);
+  console.error('[Grupo] Erro ao responder convite:',err.message||err);
  }
 }
+
 function isAllowedAdmin(e){ if(!cfg.features.onlyAllowedAdmins)return true; return getAdminIdentity(e).isAdmin; }
 function isTeleportAdmin(e){ return getAdminIdentity(e).isAdmin; }
 function iniciarConexaoBot(){ if(shuttingDown)return; slOnline=false; notifyParent('SL_CONNECTING',{botId:BOT_ID,phase:'connecting',reason:'Conectando ao Second Life...'}); console.log(`Tentando realizar login no Second Life para bot ${BOT_ID}...`); bot.login().then(r=>{ console.log('Login completo com sucesso!'); if(r&&r.agentID)botUUID=r.agentID.toString(); return bot.connectToSim(); }).then(async()=>{
