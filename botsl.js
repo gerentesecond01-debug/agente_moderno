@@ -293,6 +293,10 @@ async function handleAuthorizedGroupInvitation(e) {
  const invitationID = inviteField(e, ['imSessionID','sessionID','sessionId','invitationID','inviteID','ID']);
  const inviterID = inviteField(e, ['inviterID','inviterId','inviterUUID','inviterAgentID','invitedByID','invitedByUUID']);
  const fee = invitationFee(e);
+ if(groupID && invitationID) {
+  for(const [id,record] of pendingGroupInvites) if(Date.now()-record.receivedAt>600000) pendingGroupInvites.delete(id);
+  pendingGroupInvites.set(groupID,{groupID,invitationID,fee,receivedAt:Date.now()});
+ }
  console.log(`[Grupo] Convite: grupo=${groupID||'desconhecido'} convite=${invitationID||'desconhecido'} convidador=${inviterID||'nao informado'} taxa=${fee===null?'desconhecida':fee}`);
  if (cfg.features?.autoAcceptGroups === false) { console.log('[Grupo] Aceitar grupos desativado.'); return; }
  if (!groupID || !invitationID) { console.warn('[Grupo] Convite sem IDs necessarios; ignorado.'); return; }
@@ -335,6 +339,23 @@ async function sendGroupInvitationAccept({groupID,invitationID,fee}) {
  }
 }
 
+// O comando por IM usa UUID do remetente, nao nome de exibicao.
+// UUID de grupo sozinho nao e autorizacao de ingresso no Second Life.
+async function enterGroupByAdminCommand(groupText){
+ if(cfg.features?.autoAcceptGroups === false) return 'Aceitar grupos esta desativado no painel.';
+ const groupID=normalizeUUID(groupText,'UUID do grupo');
+ const pending=pendingGroupInvites.get(groupID);
+ if(!pending || Date.now()-pending.receivedAt>600000){
+  pendingGroupInvites.delete(groupID);
+  return `Nao tenho convite valido pendente para ${groupID}. Envie um convite real pelo grupo no Firestorm. O UUID sozinho nao permite entrar.`;
+ }
+ // Se o convite ja foi respondido automaticamente, nao o reenvie.
+ const key=`${pending.groupID}:${pending.invitationID}`;
+ if(recentGroupInvites.has(key) && Date.now()-recentGroupInvites.get(key)<120000)
+  return `O aceite para ${groupID} ja foi enviado automaticamente. Confira a lista de membros do grupo; envio nao garante ingresso.`;
+ await sendGroupInvitationAccept(pending);
+ return `Aceite solicitado para ${groupID}. Confira a lista de membros do grupo.`;
+}
 function isAllowedAdmin(e){ if(!cfg.features.onlyAllowedAdmins)return true; return getAdminIdentity(e).isAdmin; }
 function isTeleportAdmin(e){ return getAdminIdentity(e).isAdmin; }
 function iniciarConexaoBot(){ if(shuttingDown)return; slOnline=false; notifyParent('SL_CONNECTING',{botId:BOT_ID,phase:'connecting',reason:'Conectando ao Second Life...'}); console.log(`Tentando realizar login no Second Life para bot ${BOT_ID}...`); bot.login().then(r=>{ console.log('Login completo com sucesso!'); if(r&&r.agentID)botUUID=r.agentID.toString(); return bot.connectToSim(); }).then(async()=>{
@@ -387,9 +408,22 @@ function configurarRotinasAutomaticas(){ limparRotinasAutomaticas(); if(cfg.feat
   bot.clientEvents.onGroupInvite.subscribe(e => handleAuthorizedGroupInvitation(e).catch(err=>console.error('[Grupo] Erro no evento:',err.message||err)));
   console.log('[Grupo] Listener onGroupInvite registrado.');
  } else console.warn('[Grupo] Esta versao da biblioteca nao expoe onGroupInvite.');
- bot.clientEvents.onInstantMessage.subscribe(e=>{ try{
+ bot.clientEvents.onInstantMessage.subscribe(async e=>{ try{
  const commandText=String(e.message||'').trim();
- if(botUUID&&e.from.toString()===botUUID)return; if(e.dialog===InstantMessageDialog.GroupInvitation){ console.log('[Grupo] Convite chegou como IM; aguardando evento onGroupInvite.'); return; } const msg=String(e.message||'').trim(); const texto=msg.toLowerCase(); if(!isTeleportAdmin(e)&&!isCommand(texto)&&!texto.includes('maps.secondlife.com/secondlife/')){autoReply(e,msg);return;} if(cfg.features.allowRlv&&(msg.startsWith('@')||(e.binaryBucket&&e.binaryBucket.toString().includes('@')))){ processarRLV(e,msg,texto); return; } if(texto.includes('maps.secondlife.com/secondlife/')){ if(!cfg.features.allowTeleportLinks||rlvRestricoes.bloquearTeleporte){ bot.clientCommands.comms.sendInstantMessage(e.from,'Teleporte recusado por configuração ou restrição RLV ativa.').catch(()=>{}); return; } if(!isTeleportAdmin(e)){ console.log(`[Segurança] Link de teleporte ignorado de ${e.fromName||e.from||'desconhecido'}.`); bot.clientCommands.comms.sendInstantMessage(e.from,'Teleporte recusado: somente um administrador autorizado pode mover este bot.').catch(()=>{}); return; } processTeleportUrl(msg).catch(er=>console.error('Erro ao teleportar:',er.message||er)); return; } if(isCommand(texto)){ const isMovementCommand = /^(?:!\s*)?(?:tp|teleport|home)(?:\s|$)/i.test(msg); if(isMovementCommand && !isTeleportAdmin(e)){ console.log(`[Segurança] Comando de movimento ignorado de ${e.fromName||e.from||'desconhecido'}.`); bot.clientCommands.comms.sendInstantMessage(e.from,'Comando recusado: somente um administrador autorizado pode mover este bot.').catch(()=>{}); return; } if(!isAllowedAdmin(e)){ bot.clientCommands.comms.sendInstantMessage(e.from,'Você não tem permissão para comandar este bot.').catch(()=>{}); return; } processCommand(msg).then(resp=>bot.clientCommands.comms.sendInstantMessage(e.from,resp)).catch(er=>bot.clientCommands.comms.sendInstantMessage(e.from,er.message||'Erro no comando').catch(()=>{})); } }catch(err){ console.error('Erro ao processar IM:',err.message||err); } });
+ if(botUUID&&e.from.toString()===botUUID)return;
+ const groupCommand=String(e.message||'').trim().match(/^!entrar\s*grupo\s+([0-9a-f-]{36})\s*$/i);
+ if(groupCommand){
+  const sender=uuidText(e.from);
+  const admins=(cfg.security?.allowedAdminUUIDs||[]).map(uuidText).filter(Boolean);
+  if(!sender || !admins.includes(sender)){
+   console.warn('[Seguranca] !entrargrupo negado: UUID do remetente nao esta na lista de administradores.');
+   return;
+  }
+  const answer=await enterGroupByAdminCommand(groupCommand[1]);
+  await bot.clientCommands.comms.sendInstantMessage(e.from,answer);
+  return;
+ }
+ if(e.dialog===InstantMessageDialog.GroupInvitation){ console.log('[Grupo] Convite chegou como IM; aguardando evento onGroupInvite.'); return; } const msg=String(e.message||'').trim(); const texto=msg.toLowerCase(); if(!isTeleportAdmin(e)&&!isCommand(texto)&&!texto.includes('maps.secondlife.com/secondlife/')){autoReply(e,msg);return;} if(cfg.features.allowRlv&&(msg.startsWith('@')||(e.binaryBucket&&e.binaryBucket.toString().includes('@')))){ processarRLV(e,msg,texto); return; } if(texto.includes('maps.secondlife.com/secondlife/')){ if(!cfg.features.allowTeleportLinks||rlvRestricoes.bloquearTeleporte){ bot.clientCommands.comms.sendInstantMessage(e.from,'Teleporte recusado por configuração ou restrição RLV ativa.').catch(()=>{}); return; } if(!isTeleportAdmin(e)){ console.log(`[Segurança] Link de teleporte ignorado de ${e.fromName||e.from||'desconhecido'}.`); bot.clientCommands.comms.sendInstantMessage(e.from,'Teleporte recusado: somente um administrador autorizado pode mover este bot.').catch(()=>{}); return; } processTeleportUrl(msg).catch(er=>console.error('Erro ao teleportar:',er.message||er)); return; } if(isCommand(texto)){ const isMovementCommand = /^(?:!\s*)?(?:tp|teleport|home)(?:\s|$)/i.test(msg); if(isMovementCommand && !isTeleportAdmin(e)){ console.log(`[Segurança] Comando de movimento ignorado de ${e.fromName||e.from||'desconhecido'}.`); bot.clientCommands.comms.sendInstantMessage(e.from,'Comando recusado: somente um administrador autorizado pode mover este bot.').catch(()=>{}); return; } if(!isAllowedAdmin(e)){ bot.clientCommands.comms.sendInstantMessage(e.from,'Você não tem permissão para comandar este bot.').catch(()=>{}); return; } processCommand(msg).then(resp=>bot.clientCommands.comms.sendInstantMessage(e.from,resp)).catch(er=>bot.clientCommands.comms.sendInstantMessage(e.from,er.message||'Erro no comando').catch(()=>{})); } }catch(err){ console.error('Erro ao processar IM:',err.message||err); } });
  bot.clientEvents.onNearbyChat.subscribe(e=>{ if(botUUID&&e.from.toString()===botUUID)return; const msg=String(e.message||'').trim(); const texto=msg.toLowerCase(); if(cfg.features.allowRlv&&msg.startsWith('@sit:')){ try{ const target=msg.split('sit:')[1].split('=')[0].trim(); bot.clientCommands.movement.sitOnObject(new nmv.UUID(target),new nmv.Vector3([0,0,0])).catch(()=>{}); }catch(_){} return; } if(!isCommand(texto))return; const isMovementCommand=/^(?:!\s*)?(?:tp|teleport|home)(?:\s|$)/i.test(msg); if(isMovementCommand&&!isTeleportAdmin(e)){ console.log(`[Segurança] Comando de movimento local ignorado de ${e.fromName||e.from||'desconhecido'}.`); return; } if(!isAllowedAdmin(e))return; processCommand(msg).then(resp=>bot.clientCommands.comms.say(resp,0)).catch(er=>bot.clientCommands.comms.say(er.message||'Erro no comando',0)); }); }
 function isCommand(t){ return t.startsWith('!')||t==='help'||t==='ajuda'||t.startsWith('sit ')||t==='stand'||t==='status'||t==='home'||t.startsWith('tp ')||t.startsWith('teleport ')||t.startsWith('say ')||t.startsWith('invite ')||t.startsWith('convidar ')||t.startsWith('groupinvite ')||t.startsWith('attach ')||t.startsWith('wear ')||t.startsWith('vestir ')||t.startsWith('detach ')||t.startsWith('tirar ')||t==='sitground'; }
 function normalizeUUID(v,f){ const text=String(v||'').trim(); if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(text)) throw new Error(`${f} inválido. Use UUID no formato xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`); return text; }
