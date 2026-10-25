@@ -25,7 +25,7 @@ async function execute(bot,state,p,groups){
  const g=bot?.clientCommands?.group||bot?.clientCommands?.groups;
  if(action==='snapshot')return {ok:true,region:regionSnapshot(bot),dialogs:state.dialogs,walk:state.walk,capabilities:{groupList:typeof bot?.clientCommands?.agent?.getAvatarGroups==='function',hudReply:!!bot?.clientCommands?.comms?.respondToScriptDialog,autoWalk:!!bot?.clientCommands?.movement?.autoPilot}};
  if(action==='group_diagnostic'){return {ok:true,diagnostic:JSON.parse(await groups.groupDiagnosticCommand())};}
- if(action==='groups'){const message=await groups.listGroupsByAdminCommand();return {ok:!/(indispon[ií]vel|n[aã]o disponibiliza|n[aã]o retornou|sem comandos|falha ao consultar|nenhuma entrada)/i.test(message),message};}
+ if(action==='groups'){const message=await groups.listGroupsByAdminCommand();const entries=typeof groups.getGroupEntries==='function'?groups.getGroupEntries():[];return {ok:entries.length>0,groups:entries,message};}
  if(action==='leavegroup'){
   if(!UUID.test(safe(p.groupID)))throw Error('UUID do grupo inválido');
   const message=await groups.leaveGroupByAdminCommand(p.groupID);return {ok:!/(indispon[ií]vel|n[aã]o disponibiliza|falha|nenhuma opera[cç][aã]o)/i.test(message),message};
