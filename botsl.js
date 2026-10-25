@@ -310,58 +310,55 @@ async function handleAuthorizedGroupInvitation(e) {
 async function sendGroupInvitationAccept({groupID,invitationID,fee}) {
  const dedupeKey=`${groupID}:${invitationID}`;
  if(recentGroupInvites.has(dedupeKey) && Date.now()-recentGroupInvites.get(dedupeKey)<120000) return true;
- try {
-  const groupCommands=bot.clientCommands?.group || bot.clientCommands?.groups;
-  if(groupCommands && typeof groupCommands.acceptInvitation==='function') {
-   await groupCommands.acceptInvitation(new nmv.UUID(groupID),new nmv.UUID(invitationID));
-  } else {
-   // Pacote Second Life: ImprovedInstantMessage, Dialog=35, ToAgentID=grupo,
-   // ID=identificador original do convite. Construção independente do BotCore5.
-   // IMPORTANTE: pré-validar serialização antes de enviar ao circuito confiável:
-   // um pacote incompleto causa retransmissões e pode derrubar o Agent.
-   const {ImprovedInstantMessageMessage}=require('@caspertech/node-metaverse/dist/lib/classes/messages/ImprovedInstantMessage.js');
-   const {PacketFlags}=require('@caspertech/node-metaverse/dist/lib/enums/PacketFlags.js');
-   const {Utils}=require('@caspertech/node-metaverse/dist/lib/classes/Utils.js');
-   const circuit=bot.currentRegion?.circuit;
-   const agent=bot.agent;
-   if(!circuit || !agent?.agentID || !circuit.sessionID) throw Error('Circuito ou sessão não disponíveis.');
-   const zero=new nmv.UUID('00000000-0000-0000-0000-000000000000');
-   const packet=new ImprovedInstantMessageMessage();
-   const agentData={AgentID:agent.agentID,SessionID:circuit.sessionID};
-   const messageBlock={
-    FromGroup:false,ToAgentID:new nmv.UUID(groupID),ParentEstateID:0,
-    RegionID:zero,Position:new nmv.Vector3([0,0,0]),Offline:0,
-    Dialog:35,ID:new nmv.UUID(invitationID),Timestamp:0,
-    FromAgentName:Utils.StringToBuffer(''),Message:Utils.StringToBuffer(''),
-    BinaryBucket:Buffer.from([0])
-   };
-   // O gerador de mensagens da biblioteca pode exigir blocos como objetos ou listas.
-   // A variante só é usada se a serialização prévia funcionar.
-   let ready=false;
-   const failures=[];
-   for(const arrays of [false,true]) {
-    packet.AgentData=arrays?[agentData]:agentData;
-    packet.MessageBlock=arrays?[messageBlock]:messageBlock;
-    try {
-     if(typeof packet.writeToBuffer!=='function') throw Error('writeToBuffer indisponível');
-     const buf=Buffer.alloc(65536);
-     packet.writeToBuffer(buf,0);
-     ready=true;
-     console.log(`[Grupo] Pacote IM35 validado (${arrays?'blocos em listas':'blocos em objetos'}).`);
-     break;
-    } catch(error) {failures.push(error.message||String(error));}
-   }
-   if(!ready) throw Error('Pacote não passou na validação local: '+failures.join(' | '));
-   const seq=circuit.sendMessage(packet,PacketFlags.Reliable);
-   if(typeof circuit.waitForAck==='function') await circuit.waitForAck(seq,10000);
-  }
-  recentGroupInvites.set(dedupeKey,Date.now());
-  console.log(`[Grupo] Aceite IM35 transmitido para ${groupID}; aguardando confirmação da associação.`);
-  return true;
- } catch(err) {
-  console.error('[Grupo] Aceite não enviado:',err.message||err);
+ const circuit=bot.currentRegion?.circuit;
+ const comms=bot.clientCommands?.comms;
+ if(!circuit || typeof circuit.sendMessage!=='function' || typeof comms?.sendInstantMessage!=='function'){
+  console.error('[Grupo] Sem circuito ou canal de IM ativo.');
   return false;
  }
+ // Reutiliza a construção de IM normal da PRÓPRIA biblioteca instalada.
+ // Assim, blocos internos como EstateID, Position e UUID são inicializados
+ // exatamente como em um IM comum que já funciona no Agent.
+ const original=circuit.sendMessage;
+ let changed=false, done=false;
+ const groupUUID=new nmv.UUID(groupID);
+ const inviteUUID=new nmv.UUID(invitationID);
+ let restoreTimer;
+ const restore=()=>{
+  if(circuit.sendMessage===intercept) circuit.sendMessage=original;
+  if(restoreTimer) clearTimeout(restoreTimer);
+ };
+ function intercept(packet,...args){
+  if(!done && packet?.constructor?.name==='ImprovedInstantMessageMessage'){
+   const block=packet.MessageBlock;
+   const entry=Array.isArray(block)?block[0]:block;
+   if(!entry) throw Error('Mensagem IM sem MessageBlock');
+   const destination=String(entry.ToAgentID||'').toLowerCase();
+   if(destination===groupID.toLowerCase()){
+    // Protocolo OpenMetaverse: Dialog 35; ToAgentID = grupo; ID = sessão do convite.
+    entry.Dialog=35;
+    entry.ID=inviteUUID;
+    entry.Message=Buffer.alloc(0);
+    entry.BinaryBucket=Buffer.alloc(0);
+    entry.Offline=1;
+    changed=true;done=true;
+    console.log('[Grupo] IM35 montado a partir de um IM normal da biblioteca.');
+   }
+  }
+  return original.call(circuit,packet,...args);
+ }
+ try {
+  circuit.sendMessage=intercept;
+  restoreTimer=setTimeout(restore,12000);
+  await comms.sendInstantMessage(groupUUID,'');
+  if(!changed) throw Error('A biblioteca não passou o pacote IM pelo circuito interceptado.');
+  recentGroupInvites.set(dedupeKey,Date.now());
+  console.log(`[Grupo] IM35 enviado para ${groupID}; envio não comprova associação ao grupo.`);
+  return true;
+ }catch(err){
+  console.error('[Grupo] Aceite IM35 não concluído:',err.message||err);
+  return false;
+ }finally{restore();}
 }
 
 // O comando por IM usa UUID do remetente, nao nome de exibicao.
