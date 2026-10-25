@@ -209,7 +209,7 @@ function configurarMonitorDeConexao(){
  assinarEvento('onConnectionClosed',e=>tratarEventoDesconexao('conexão fechada',e));
  assinarEvento('onLogout',e=>tratarEventoDesconexao('logout detectado',e));
  assinarEvento('onClose',e=>tratarEventoDesconexao('conexão encerrada',e));
- assinarEvento('onAlertMessage',e=>{ const msg=eventoTexto(e); console.log('[Alerta SL] '+msg); if(/RegionRestart|will restart|will be logged out|logged out/i.test(msg)&&!desconexaoDuranteTeleporte()){const fallback=String(cfg.home?.url||'');if(/^https:\/\/maps\.secondlife\.com\/secondlife\//i.test(fallback)&&slOnline){processTeleportUrl(fallback).then(x=>console.log('[Região reiniciando] Fuga para Home:',x)).catch(e=>{console.error('[Fuga] '+e.message);agendarReconexao('restart da região detectado',Number(process.env.SL_REGION_RECOVERY_DELAY_MS||90000))})}else agendarReconexao('restart da região detectado',Number(process.env.SL_REGION_RECOVERY_DELAY_MS||90000));} });
+ assinarEvento('onAlertMessage',e=>{ confirmGroupEntryFromAlert(e); confirmGroupDepartureFromAlert(e); const msg=eventoTexto(e); console.log('[Alerta SL] '+msg); if(/RegionRestart|will restart|will be logged out|logged out/i.test(msg)&&!desconexaoDuranteTeleporte()){const fallback=String(cfg.home?.url||'');if(/^https:\/\/maps\.secondlife\.com\/secondlife\//i.test(fallback)&&slOnline){processTeleportUrl(fallback).then(x=>console.log('[Região reiniciando] Fuga para Home:',x)).catch(e=>{console.error('[Fuga] '+e.message);agendarReconexao('restart da região detectado',Number(process.env.SL_REGION_RECOVERY_DELAY_MS||90000))})}else agendarReconexao('restart da região detectado',Number(process.env.SL_REGION_RECOVERY_DELAY_MS||90000));} });
 }
 function agendarReconexao(reason,delayMs){
  if(shuttingDown)return;
@@ -266,6 +266,39 @@ function getAdminIdentity(e){ const n=String((e&&e.fromName)||'').toLowerCase().
 // Falha segura: nunca aceita se o valor da taxa nao estiver confirmado.
 const recentGroupInvites = new Map();
 const pendingGroupInvites = new Map(); // convite -> dados, expira em 10 minutos
+
+// Confirmacoes de entrada: nunca confundir IM35 enviado com entrada efetiva.
+const pendingGroupEntries = new Map();
+function notifyGroupAdmins(message){
+ const ids=[...new Set((cfg.security?.allowedAdminUUIDs||[]).map(uuidText).filter(Boolean))];
+ for(const id of ids) bot.clientCommands?.comms?.sendInstantMessage(new nmv.UUID(id),message).catch(err=>console.warn('[Grupo] IM ao administrador falhou:',err.message||err));
+}
+function confirmGroupEntryFromAlert(event){
+ const msg=eventoTexto(event);
+ const raw=JSON.stringify(event||{});
+ // Somente confirmacoes explicitas de ingresso, nunca 'invitation accepted' ou 'request sent'.
+ if(!/GroupJoin|GroupJoined|You have joined the group|You are now a member of/i.test(raw))return;
+ const nameMatch=msg.match(/(?:You have joined the group|You are now a member of)\s+['“]?([^'”\n.]+)['”]?/i);
+ const groupName=nameMatch?nameMatch[1].trim():'';
+ const eventGroupID=inviteField(event,['groupID','GroupID','groupId']);
+ const matches=[...pendingGroupEntries.values()].filter(p=>Date.now()-p.sentAt<120000 && (!eventGroupID||p.groupID===eventGroupID));
+ if(matches.length!==1){console.log('[Grupo] Alerta de entrada recebido, mas grupo pendente nao identificado de forma unica.');return;}
+ const pending=matches[0];
+ pendingGroupEntries.delete(pending.groupID);
+ const message=`✅ Sucesso! Entrei no grupo ${groupName||pending.groupID}.`;
+ console.log('[Grupo] Entrada confirmada pelo Second Life:',pending.groupID,groupName);
+ if(pending.waiters.length){for(const resolve of pending.waiters)resolve(message);}
+ else notifyGroupAdmins(message);
+}
+function waitForGroupEntry(groupID){
+ const pending=pendingGroupEntries.get(groupID);
+ if(!pending)return Promise.resolve('⚠️ Nao ha aceite pendente para este grupo.');
+ return new Promise(resolve=>{
+  const timer=setTimeout(()=>resolve(`⚠️ Aceite enviado para ${groupID}, mas nao recebi confirmacao de entrada em 15 segundos.`),15000);
+  pending.waiters.push(message=>{clearTimeout(timer);resolve(message);});
+ });
+}
+
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 function uuidText(v) { try { const s = String(v == null ? '' : v).trim().toLowerCase(); return UUID_RE.test(s) ? s : ''; } catch (_) { return ''; } }
@@ -357,6 +390,7 @@ async function sendGroupInvitationAccept({groupID,invitationID,fee}) {
   await comms.sendInstantMessage(groupUUID,'');
   if(!changed) throw Error('A biblioteca não passou o pacote IM pelo circuito interceptado.');
   recentGroupInvites.set(dedupeKey,Date.now());
+  pendingGroupEntries.set(groupID,{groupID,sentAt:Date.now(),waiters:[]});
   console.log(`[Grupo] IM35 enviado para ${groupID}; envio não comprova associação ao grupo.`);
   return true;
  }catch(err){
@@ -367,16 +401,66 @@ async function sendGroupInvitationAccept({groupID,invitationID,fee}) {
 
 // Gerenciamento de grupos. Somente chamadas comprovadamente disponíveis na biblioteca.
 function groupCommands(){return bot?.clientCommands?.group || bot?.clientCommands?.groups || null;}
+// A saída é confirmada pelo alerta GroupDepart do Second Life, não pelo retorno do método.
+// Apenas uma saída por vez: o alerta não contém UUID do grupo.
+let pendingGroupDeparture = null;
+function confirmGroupDepartureFromAlert(event){
+ const pending=pendingGroupDeparture;
+ if(!pending)return;
+ const msg=eventoTexto(event);
+ const raw=JSON.stringify(event||{});
+ const isDepart=/GroupDepart/i.test(raw) || /You have left the group/i.test(msg);
+ if(!isDepart)return;
+ const match=msg.match(/You have left the group\s+['“]?([^'”]+)['”]?/i);
+ const groupName=match?match[1].trim():'';
+ pending.finish({ok:true,groupName});
+}
 async function leaveGroupByAdminCommand(groupText){
  const id=normalizeUUID(groupText,'UUID do grupo');
  const g=groupCommands();
- if(!g)return 'Saida nao disponivel: biblioteca sem comandos de grupos.';
+ if(!g)return 'Saída indisponível: biblioteca sem comandos de grupos.';
+ if(pendingGroupDeparture)return 'Já estou aguardando a confirmação de outra saída de grupo. Tente novamente em alguns segundos.';
  const method=['leaveGroup','leave','leaveGroupByID','resignFromGroup'].find(k=>typeof g[k]==='function');
- if(!method)return 'Saida nao disponivel nesta versao da biblioteca. Nenhuma operacao foi enviada.';
- try {await g[method](new nmv.UUID(id));
-  console.log(`[Grupo] Saida solicitada de ${id} via ${method}.`);
-  return `Saida solicitada para ${id}. Confira a lista de membros; ainda nao foi confirmada.`;
- }catch(err){console.error('[Grupo] Falha ao sair:',err.message||err);return `Falha ao sair do grupo: ${err.message||err}`;}
+ if(!method)return 'Saída indisponível nesta versão da biblioteca. Nenhuma operação foi enviada.';
+ let finish;
+ const confirmed=new Promise(resolve=>{
+  let completed=false;
+  finish=result=>{if(completed)return;completed=true;clearTimeout(timer);if(pendingGroupDeparture?.finish===finish)pendingGroupDeparture=null;resolve(result);};
+  const timer=setTimeout(()=>finish({ok:false,timeout:true}),15000);
+ });
+ pendingGroupDeparture={groupID:id,finish};
+ try{
+  await g[method](new nmv.UUID(id));
+  console.log(`[Grupo] Saída solicitada de ${id} via ${method}; aguardando GroupDepart.`);
+ }catch(err){
+  finish({ok:false,error:String(err.message||err)});
+ }
+ const result=await confirmed;
+ if(result.ok){
+  console.log(`[Grupo] Saída confirmada pelo Second Life: ${id} (${result.groupName||'nome não informado'}).`);
+  return `✅ Sucesso! Saí do grupo ${result.groupName||id}.`;
+ }
+ if(result.error)return `❌ Não foi possível sair do grupo: ${result.error}`;
+ return `⚠️ Solicitei a saída de ${id}, mas não recebi confirmação do Second Life em 15 segundos. Confira se ainda estou no grupo.`;
+}
+// Mensagens de grupo precisam de uma sessao real, nao de um IM privado para o UUID.
+async function sendGroupChatByAdmin(groupText,messageText){
+ const groupID=normalizeUUID(groupText,'UUID do grupo');
+ const content=String(messageText||'').trim();
+ if(!content||content.length>900)throw Error('Mensagem vazia ou maior que 900 caracteres.');
+ const g=groupCommands();const comms=bot?.clientCommands?.comms;
+ // Usar apenas interfaces explicitas; nao simular envio com IM individual.
+ const targets=[g,comms].filter(Boolean);
+ const methods=['sendGroupMessage','sendGroupChat','sendGroupInstantMessage'];
+ for(const target of targets){
+  for(const method of methods){
+   if(typeof target[method]==='function'){
+    await target[method](new nmv.UUID(groupID),content);
+    return `Envio solicitado ao chat do grupo ${groupID}. A entrega aos membros nao foi confirmada.`;
+   }
+  }
+ }
+ throw Error('A biblioteca instalada nao oferece envio de chat de grupo por metodo conhecido. Nenhuma mensagem foi enviada.');
 }
 async function listGroupsByAdminCommand(){
  const g=groupCommands();
@@ -404,9 +488,9 @@ async function enterGroupByAdminCommand(groupText){
  // Se o convite ja foi respondido automaticamente, nao o reenvie.
  const key=`${pending.groupID}:${pending.invitationID}`;
  if(recentGroupInvites.has(key) && Date.now()-recentGroupInvites.get(key)<120000)
-  return `O aceite para ${groupID} ja foi enviado automaticamente. Confira a lista de membros do grupo; envio nao garante ingresso.`;
+  return await waitForGroupEntry(groupID);
  const ok=await sendGroupInvitationAccept(pending);
- return ok ? `Resposta de aceite enviada para ${groupID}. Confira a lista de membros: ainda nao tenho confirmacao de entrada.` : `Convite recebido para ${groupID}, mas o pacote de aceite nao passou na validacao. Veja os logs [Grupo].`;
+ return ok ? await waitForGroupEntry(groupID) : `Convite recebido para ${groupID}, mas o pacote de aceite nao passou na validacao. Veja os logs [Grupo].`;
 }
 function isAllowedAdmin(e){ if(!cfg.features.onlyAllowedAdmins)return true; return getAdminIdentity(e).isAdmin; }
 function isTeleportAdmin(e){ return getAdminIdentity(e).isAdmin; }
@@ -455,7 +539,7 @@ function configurarRotinasAutomaticas(){ limparRotinasAutomaticas(); if(cfg.feat
     console.error('[TP Offer] Erro ao aceitar Offer Teleport:',err.message||err);
   }
  });
- if(bot.clientEvents.onScriptDialog) bot.clientEvents.onScriptDialog.subscribe(d=>console.log('[HUD Dialog]', {message:d?.message ?? null, buttons:d?.buttons ?? null, objectID:d?.objectID?.toString?.() ?? null}));
+ if(bot.clientEvents.onScriptDialog && typeof bot.clientEvents.onScriptDialog.subscribe==='function') bot.clientEvents.onScriptDialog.subscribe(d=>{nexusPro.recordDialog(nexusProState,d);console.log('[HUD Dialog] registrado',nexusProState.dialogs[0]);});
  if(bot.clientEvents.onGroupInvite && typeof bot.clientEvents.onGroupInvite.subscribe === 'function') {
   bot.clientEvents.onGroupInvite.subscribe(e => handleAuthorizedGroupInvitation(e).catch(err=>console.error('[Grupo] Erro no evento:',err.message||err)));
   console.log('[Grupo] Listener onGroupInvite registrado.');
@@ -543,8 +627,8 @@ function agendarAutoSitNaRegiao(destino,uuid){
  setTimeout(tentar,Number(process.env.HOME_SIT_DELAY_MS||10000));
 }
 async function goHomeFromConfig(){ try{ if(!cfg.home||!cfg.home.url){ console.log('[Home] URL da ilha não configurada.'); return 'URL da ilha não configurada.'; } const msg=await processTeleportUrl(cfg.home.url); console.log('[Home] '+msg); if(cfg.home.autoSit&&cfg.home.objectUUID)agendarAutoSitNaRegiao(); return msg+' Aguardando chegar na região para sentar no objeto configurado.'; }catch(err){ console.error('[Home] Erro:',err.message||err); return 'Erro no home: '+(err.message||err); } }
-async function processCommand(message){ let text=message.trim(); if(text.startsWith('!'))text=text.slice(1).trim(); if(text.length===0)return 'comando vazio'; const pieces=text.includes('|')?text.split('|'):text.split(/\s+/); const command=(pieces.shift()||'').trim().toLowerCase(); const args=pieces.map(i=>i.trim()).filter(Boolean); switch(command){ case 'help':case 'ajuda':return '!entrargrupo UUID | !sairgrupo UUID | !listargrupos | !status | !home | !tp LINK | !invite AVATAR_UUID [GRUPO_UUID] [ROLE_UUID] | !sit UUID | !stand | !sitground | !say [canal] texto | !attach item ponto | !detach item'; case 'status':return `online. bot=${BOT_ID}. região=${(bot.currentRegion&&bot.currentRegion.regionName)||'desconhecida'}. RLV_TP=${rlvRestricoes.bloquearTeleporte?'Bloqueado':'Livre'}`; case 'home':return await goHomeFromConfig(); case 'tp':case 'teleport':if(!args.length)throw new Error('Link ausente'); return await processTeleportUrl(args.join(' ')); case 'sit':case 'sentar':if(!args.length||args[0].length<32)throw new Error('uso: !sit UUID'); await bot.clientCommands.movement.sitOnObject(new nmv.UUID(args[0]),new nmv.Vector3([0,0,0])); return `Comando sit enviado para ${args[0]}`; case 'stand':case 'levantar':bot.clientCommands.movement.stand(); return 'stand enviado'; case 'sitground':bot.clientCommands.movement.sitOnGround(); return 'sit ground enviado'; case 'invite':case 'convidar':case 'groupinvite':if(!args.length)throw new Error('Uso: !invite AVATAR_UUID [GRUPO_UUID] [ROLE_UUID]'); return await sendGroupInviteFromConfig({avatarID:args[0],groupID:args[1],roleID:args[2]}); case 'say':case 'falar':{ if(!args.length)throw new Error('Texto ausente'); let channel=0, sayText=args.join(' '); if(args.length>=2&&/^-?\d+$/.test(args[0])){ channel=Number.parseInt(args[0],10); sayText=args.slice(1).join(' '); } await bot.clientCommands.comms.say(sayText,channel); return `chat enviado no canal ${channel}`;} case 'attach':case 'wear':case 'vestir':{ if(!args.length)throw new Error('Uso: !attach nomeDoItem [AttachmentPoint]'); const item=await findInventoryItem(args[0]); await item.attachToAvatar(parseAttachmentPoint(args[1]||'Default')); return `attach enviado: ${item.name}`;} case 'detach':case 'tirar':{ if(!args.length)throw new Error('Uso: !detach nomeDoItem'); const item=await findInventoryItem(args[0]); await item.detachFromAvatar(); return `detach enviado: ${item.name}`;} default:throw new Error(`comando desconhecido: ${command}. use !help`); } }
+async function processCommand(message){ let text=message.trim(); if(text.startsWith('!'))text=text.slice(1).trim(); if(text.length===0)return 'comando vazio'; const pieces=text.includes('|')?text.split('|'):text.split(/\s+/); const command=(pieces.shift()||'').trim().toLowerCase(); const args=pieces.map(i=>i.trim()).filter(Boolean); switch(command){ case 'help':case 'ajuda':return '!entrargrupo UUID | !sairgrupo UUID | !listargrupos | !msggrupo UUID TEXTO | !status | !home | !tp LINK | !invite AVATAR_UUID [GRUPO_UUID] [ROLE_UUID] | !sit UUID | !stand | !sitground | !say [canal] texto | !attach item ponto | !detach item'; case 'msggrupo':case 'mensagemgrupo':if(args.length<2)throw Error('Uso: !msggrupo UUID mensagem');return await sendGroupChatByAdmin(args[0],args.slice(1).join(' ')); case 'status':return `online. bot=${BOT_ID}. região=${(bot.currentRegion&&bot.currentRegion.regionName)||'desconhecida'}. RLV_TP=${rlvRestricoes.bloquearTeleporte?'Bloqueado':'Livre'}`; case 'home':return await goHomeFromConfig(); case 'tp':case 'teleport':if(!args.length)throw new Error('Link ausente'); return await processTeleportUrl(args.join(' ')); case 'sit':case 'sentar':if(!args.length||args[0].length<32)throw new Error('uso: !sit UUID'); await bot.clientCommands.movement.sitOnObject(new nmv.UUID(args[0]),new nmv.Vector3([0,0,0])); return `Comando sit enviado para ${args[0]}`; case 'stand':case 'levantar':bot.clientCommands.movement.stand(); return 'stand enviado'; case 'sitground':bot.clientCommands.movement.sitOnGround(); return 'sit ground enviado'; case 'invite':case 'convidar':case 'groupinvite':if(!args.length)throw new Error('Uso: !invite AVATAR_UUID [GRUPO_UUID] [ROLE_UUID]'); return await sendGroupInviteFromConfig({avatarID:args[0],groupID:args[1],roleID:args[2]}); case 'say':case 'falar':{ if(!args.length)throw new Error('Texto ausente'); let channel=0, sayText=args.join(' '); if(args.length>=2&&/^-?\d+$/.test(args[0])){ channel=Number.parseInt(args[0],10); sayText=args.slice(1).join(' '); } await bot.clientCommands.comms.say(sayText,channel); return `chat enviado no canal ${channel}`;} case 'attach':case 'wear':case 'vestir':{ if(!args.length)throw new Error('Uso: !attach nomeDoItem [AttachmentPoint]'); const item=await findInventoryItem(args[0]); await item.attachToAvatar(parseAttachmentPoint(args[1]||'Default')); return `attach enviado: ${item.name}`;} case 'detach':case 'tirar':{ if(!args.length)throw new Error('Uso: !detach nomeDoItem'); const item=await findInventoryItem(args[0]); await item.detachFromAvatar(); return `detach enviado: ${item.name}`;} default:throw new Error(`comando desconhecido: ${command}. use !help`); } }
 async function boot(){ if(!BOT_ID)throw new Error('BOT_ID ausente. Inicie pelo Agent.'); cfg=loadRuntimeConfig(); if(!cfg)throw new Error(`Configuração do bot ${BOT_ID} ausente.`); validarCredenciais(); loginParameters=makeLoginParameters(true); bot=new nmv.Bot(loginParameters,options); iniciarConexaoBot(); }
 boot().catch(err=>{ console.error('Erro ao iniciar bot:',err.message||err); process.exit(1); });
-process.on('message',async message=>{ try{ if(!message)return; if(!bot||!bot.clientCommands||!slOnline)throw new Error('Bot ainda não está online no Second Life.'); if(message.type==='TELEPORT'){const result=await processTeleportUrl(String(message.payload?.destination||''));console.log('[Teleporte programado] '+result);if(message.payload?.autoSit&&message.payload?.objectUUID)agendarAutoSitNaRegiao(String(message.payload.destination),String(message.payload.objectUUID));return;} if(message.type==='GROUP_INVITE'){ const result=await sendGroupInviteFromConfig(message.payload||{}); console.log(`[Grupo] ${result}`); return; } if(message.type==='GO_HOME'){ const result=await goHomeFromConfig(); console.log(`[Home] ${result}`); return; } if(message.type==='NEXUS_PRO'){const result=await nexusPro.execute(bot,nexusProState,message.payload||{},{leaveGroupByAdminCommand,listGroupsByAdminCommand,sendGroupInviteFromConfig});notifyParent('NEXUS_PRO_RESULT',{requestId:message.requestId,result});return;} }catch(err){ console.error('[Comando] Erro:',err.message||err); if(message?.type==='NEXUS_PRO')notifyParent('NEXUS_PRO_RESULT',{requestId:message.requestId,result:{ok:false,error:String(err.message||err)}}); } });
+process.on('message',async message=>{ try{ if(!message)return; if(!bot||!bot.clientCommands||!slOnline)throw new Error('Bot ainda não está online no Second Life.'); if(message.type==='TELEPORT'){const result=await processTeleportUrl(String(message.payload?.destination||''));console.log('[Teleporte programado] '+result);if(message.payload?.autoSit&&message.payload?.objectUUID)agendarAutoSitNaRegiao(String(message.payload.destination),String(message.payload.objectUUID));return;} if(message.type==='GROUP_INVITE'){ const result=await sendGroupInviteFromConfig(message.payload||{}); console.log(`[Grupo] ${result}`); return; } if(message.type==='GO_HOME'){ const result=await goHomeFromConfig(); console.log(`[Home] ${result}`); return; } if(message.type==='NEXUS_PRO'){const result=await nexusPro.execute(bot,nexusProState,message.payload||{},{leaveGroupByAdminCommand,listGroupsByAdminCommand,sendGroupInviteFromConfig,sendGroupChatByAdmin});notifyParent('NEXUS_PRO_RESULT',{requestId:message.requestId,result});return;} }catch(err){ console.error('[Comando] Erro:',err.message||err); if(message?.type==='NEXUS_PRO')notifyParent('NEXUS_PRO_RESULT',{requestId:message.requestId,result:{ok:false,error:String(err.message||err)}}); } });
 process.on('SIGTERM',async()=>{ shuttingDown=true; slOnline=false; notifyParent('SL_OFFLINE',{botId:BOT_ID,reason:'SIGTERM recebido',phase:'offline'}); console.log('Recebido SIGTERM. Encerrando bot.'); limparRotinasAutomaticas(); for(const t of pendingReplyTimers)clearTimeout(t); pendingReplyTimers.clear(); if(reconnectTimer)clearTimeout(reconnectTimer); if(regionWatchTimer)clearInterval(regionWatchTimer); try{ if(bot&&typeof bot.logout==='function') await Promise.race([bot.logout(),new Promise(r=>setTimeout(r,2500))]); }catch(e){ console.log('Logout SL finalizado com aviso:',e.message||e); } process.exit(0); });
