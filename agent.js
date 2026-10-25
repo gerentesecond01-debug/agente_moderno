@@ -13,6 +13,8 @@ let poolApproved=false;
 if(!MASTER_URL||/SEU-MASTER/i.test(MASTER_URL))console.warn('⚠️ Edite master.config.js no GitHub e informe a URL do Master.');
 const app=express();app.use(express.json({limit:'512kb'}));
 let child=null,currentConfig=null,logs=[],pendingMasterLog='';
+const proPending=new Map();let proSeq=0;
+function proRequest(payload){if(!child||!status.online)return Promise.resolve({ok:false,error:'Bot offline'});return new Promise(resolve=>{const requestId=String(++proSeq);const timer=setTimeout(()=>{proPending.delete(requestId);resolve({ok:false,error:'Tempo esgotado aguardando resposta do bot'})},15000);proPending.set(requestId,{resolve,timer});child.send({type:'NEXUS_PRO',requestId,payload});});}
 let desiredRunning=false;
 let recoveryTimer=null;
 let recoveryEpoch=0;
@@ -51,7 +53,7 @@ async function recoverFromEventQueueLoop(){
 }
 function auth(req,res,next){const got=String(req.headers.authorization||'').replace(/^Bearer\s+/i,'');if(got!==AGENT_SECRET)return res.status(403).json({ok:false,error:'Agent Secret inválido'});next()}
 function setStatus(p){status={...status,...p,reachable:true,lastChangeAt:new Date().toISOString()}}
-function childMessage(m={}){if(m.type==='BOT_HEARTBEAT'){lastChildHeartbeat=Date.now();setStatus({running:true,pid:child&&child.pid,region:m.payload?.region||status.region||''});return;}if(m.type==='SL_ONLINE'){lastChildHeartbeat=Date.now();setStatus({running:true,online:true,phase:'online',lastReason:'',region:m.payload?.region||status.region||'',connectedAt:status.connectedAt||new Date().toISOString()});if(stableOnlineTimer)clearTimeout(stableOnlineTimer);stableOnlineTimer=setTimeout(()=>{eventQueueRecoveryLevel=0;eventQueueFailures=[];},300000);if(stableOnlineTimer.unref)stableOnlineTimer.unref();}if(m.type==='SL_CONNECTING')setStatus({running:true,online:false,phase:m.payload?.phase||'connecting',lastReason:m.payload?.reason||'Conectando...'});if(m.type==='SL_OFFLINE')setStatus({running:!!child,online:false,phase:m.payload?.phase||'offline',lastReason:m.payload?.reason||'Offline',connectedAt:null});}
+function childMessage(m={}){if(m.type==='NEXUS_PRO_RESULT'){const entry=proPending.get(String(m.payload?.requestId));if(entry){clearTimeout(entry.timer);proPending.delete(String(m.payload.requestId));entry.resolve(m.payload.result||{ok:false,error:'Resposta vazia'});}return;}if(m.type==='BOT_HEARTBEAT'){lastChildHeartbeat=Date.now();setStatus({running:true,pid:child&&child.pid,region:m.payload?.region||status.region||''});return;}if(m.type==='SL_ONLINE'){lastChildHeartbeat=Date.now();setStatus({running:true,online:true,phase:'online',lastReason:'',region:m.payload?.region||status.region||'',connectedAt:status.connectedAt||new Date().toISOString()});if(stableOnlineTimer)clearTimeout(stableOnlineTimer);stableOnlineTimer=setTimeout(()=>{eventQueueRecoveryLevel=0;eventQueueFailures=[];},300000);if(stableOnlineTimer.unref)stableOnlineTimer.unref();}if(m.type==='SL_CONNECTING')setStatus({running:true,online:false,phase:m.payload?.phase||'connecting',lastReason:m.payload?.reason||'Conectando...'});if(m.type==='SL_OFFLINE')setStatus({running:!!child,online:false,phase:m.payload?.phase||'offline',lastReason:m.payload?.reason||'Offline',connectedAt:null});}
 function start(config){
  desiredRunning=true;
  if(child)return {ok:true,message:'Bot já está ligado.'};
@@ -134,6 +136,7 @@ app.post('/start',auth,(q,r)=>{try{r.json(start(q.body?.config))}catch(e){r.stat
 app.post('/stop',auth,async(_q,r)=>{try{r.json(await stop())}catch(e){r.status(500).json({ok:false,error:e.message})}});
 app.post('/restart',auth,async(q,r)=>{try{r.json(await restart(q.body?.config))}catch(e){r.status(400).json({ok:false,error:e.message})}});
 app.post('/teleport',auth,(q,r)=>{const destination=String(q.body?.destination||'');if(!/^https:\/\/maps\.secondlife\.com\/secondlife\/[^/]+\/\d+\/\d+\/\d+\/?$/i.test(destination))return r.status(400).json({ok:false,error:'SLURL inválida'});const autoSit=!!q.body?.autoSit,objectUUID=String(q.body?.objectUUID||'');if(autoSit&&!/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(objectUUID))return r.status(400).json({ok:false,error:'UUID inválido'});r.json(send('TELEPORT',{destination,autoSit,objectUUID}))});
+app.post('/nexus-pro',auth,async(q,r)=>{try{r.json(await proRequest(q.body||{}))}catch(e){r.status(500).json({ok:false,error:e.message})}});
 app.post('/home',auth,(_q,r)=>r.json(send('GO_HOME')));app.post('/invite',auth,(q,r)=>r.json(send('GROUP_INVITE',q.body||{})));
 app.listen(PORT,'0.0.0.0',()=>{console.log(`✅ Agent ${AGENT_KEY} ativo na porta ${PORT}. Aguardando Master/atribuição.`);bootstrap(true).catch(e=>addLog('Bootstrap: '+e.message));setInterval(()=>heartbeat().catch(()=>{}),60000);setInterval(()=>watchdog().catch(e=>addLog('Watchdog: '+e.message)),WATCHDOG_INTERVAL_MS)});
 process.on('SIGTERM',async()=>{desiredRunning=false;try{await stop()}catch{}process.exit(0)});
