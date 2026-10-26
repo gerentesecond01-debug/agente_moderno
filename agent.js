@@ -27,6 +27,10 @@ let eventQueueFailures=[];
 let eventQueueRecoveryInProgress=false;
 let eventQueueRecoveryLevel=0;
 let stableOnlineTimer=null;
+let watchdogStaleChecks=0;
+let childStartedAt=0;
+const WATCHDOG_STARTUP_GRACE_MS=Math.max(180000,Number(process.env.WATCHDOG_STARTUP_GRACE_MS||300000));
+const WATCHDOG_CONFIRMATIONS=Math.max(2,Number(process.env.WATCHDOG_CONFIRMATIONS||3));
 const EQ_WINDOW_MS=Math.max(30000,Number(process.env.EVENT_QUEUE_WINDOW_MS||60000));
 const EQ_MAX_FAILURES=Math.max(3,Number(process.env.EVENT_QUEUE_MAX_FAILURES||5));
 const EQ_BACKOFF_MS=[90000,120000,300000,600000,900000];
@@ -53,7 +57,7 @@ async function recoverFromEventQueueLoop(){
 }
 function auth(req,res,next){const got=String(req.headers.authorization||'').replace(/^Bearer\s+/i,'');if(got!==AGENT_SECRET)return res.status(403).json({ok:false,error:'Agent Secret inválido'});next()}
 function setStatus(p){status={...status,...p,reachable:true,lastChangeAt:new Date().toISOString()}}
-function childMessage(m={}){if(m.type==='NEXUS_PRO_RESULT'){const entry=proPending.get(String(m.payload?.requestId));if(entry){clearTimeout(entry.timer);proPending.delete(String(m.payload.requestId));entry.resolve(m.payload.result||{ok:false,error:'Resposta vazia'});}return;}if(m.type==='BOT_HEARTBEAT'){lastChildHeartbeat=Date.now();setStatus({running:true,pid:child&&child.pid,region:m.payload?.region||status.region||''});return;}if(m.type==='SL_ONLINE'){lastChildHeartbeat=Date.now();setStatus({running:true,online:true,phase:'online',lastReason:'',region:m.payload?.region||status.region||'',connectedAt:status.connectedAt||new Date().toISOString()});if(stableOnlineTimer)clearTimeout(stableOnlineTimer);stableOnlineTimer=setTimeout(()=>{eventQueueRecoveryLevel=0;eventQueueFailures=[];},300000);if(stableOnlineTimer.unref)stableOnlineTimer.unref();}if(m.type==='SL_CONNECTING')setStatus({running:true,online:false,phase:m.payload?.phase||'connecting',lastReason:m.payload?.reason||'Conectando...'});if(m.type==='SL_OFFLINE')setStatus({running:!!child,online:false,phase:m.payload?.phase||'offline',lastReason:m.payload?.reason||'Offline',connectedAt:null});}
+function childMessage(m={}){if(m.type==='NEXUS_PRO_RESULT'){const entry=proPending.get(String(m.payload?.requestId));if(entry){clearTimeout(entry.timer);proPending.delete(String(m.payload.requestId));entry.resolve(m.payload.result||{ok:false,error:'Resposta vazia'});}return;}if(m.type==='BOT_HEARTBEAT'){watchdogStaleChecks=0;lastChildHeartbeat=Date.now();setStatus({running:true,pid:child&&child.pid,region:m.payload?.region||status.region||''});return;}if(m.type==='SL_ONLINE'){lastChildHeartbeat=Date.now();setStatus({running:true,online:true,phase:'online',lastReason:'',region:m.payload?.region||status.region||'',connectedAt:status.connectedAt||new Date().toISOString()});if(stableOnlineTimer)clearTimeout(stableOnlineTimer);stableOnlineTimer=setTimeout(()=>{eventQueueRecoveryLevel=0;eventQueueFailures=[];},300000);if(stableOnlineTimer.unref)stableOnlineTimer.unref();}if(m.type==='SL_CONNECTING')setStatus({running:true,online:false,phase:m.payload?.phase||'connecting',lastReason:m.payload?.reason||'Conectando...'});if(m.type==='SL_OFFLINE')setStatus({running:!!child,online:false,phase:m.payload?.phase||'offline',lastReason:m.payload?.reason||'Offline',connectedAt:null});}
 function start(config){
  desiredRunning=true;
  if(child)return {ok:true,message:'Bot já está ligado.'};
@@ -62,17 +66,17 @@ function start(config){
  const safe={...currentConfig};delete safe.agentSecret;delete safe.renderApiKey;
  const env={...process.env,BOT_ID:String(BOT_ID),BOT_CONFIG_B64:Buffer.from(JSON.stringify(safe)).toString('base64')};
  child=fork(path.join(__dirname,'botsl.js'),[],{silent:true,env});
- lastChildHeartbeat=Date.now();
+ lastChildHeartbeat=Date.now();childStartedAt=Date.now();watchdogStaleChecks=0;
  const thisChild=child;
  setStatus({running:true,online:false,phase:'starting',lastReason:'Processo iniciado',startedAt:new Date().toISOString(),pid:child.pid});
  addLog('🚀 Processo do bot iniciado.');
  child.stdout.on('data',d=>addLog(d));child.stderr.on('data',d=>addLog(d));child.on('message',childMessage);
  child.on('exit',(c,signal)=>{
    addLog(`🛑 Processo finalizado código ${c}${signal?` sinal ${signal}`:''}`);
-   if(child===thisChild)child=null;
+   if(child===thisChild){child=null;for(const [id,entry] of proPending){clearTimeout(entry.timer);entry.resolve({ok:false,error:'Sessão do bot encerrada'});proPending.delete(id);}}
    setStatus({running:false,online:false,phase:'offline',pid:null,lastReason:`Processo finalizado código ${c}${signal?` (${signal})`:''}`});
    // Só tenta religar se o painel ainda deseja o bot online.
-   if(desiredRunning){const epoch=recoveryEpoch;recoveryTimer=setTimeout(()=>{recoveryTimer=null;if(epoch!==recoveryEpoch||!desiredRunning||child||stopPromise)return;bootstrap(true).catch(e=>addLog('Bootstrap após queda: '+e.message))},8000);}
+   if(desiredRunning&&!eventQueueRecoveryInProgress){const epoch=recoveryEpoch;recoveryTimer=setTimeout(()=>{recoveryTimer=null;if(epoch!==recoveryEpoch||!desiredRunning||child||stopPromise)return;bootstrap(true).catch(e=>addLog('Bootstrap após queda: '+e.message))},8000);}
  });
  return {ok:true,message:'Bot ligado.'};
 }
@@ -98,7 +102,11 @@ async function restart(config){desiredRunning=false;await stop();if(config)curre
 async function watchdog(){
  if(!desiredRunning||!child||stopPromise||watchdogBusy)return;
  const age=Date.now()-lastChildHeartbeat;
- if(age<WATCHDOG_STALE_MS)return;
+ if(Date.now()-childStartedAt<WATCHDOG_STARTUP_GRACE_MS)return;
+ if(age<WATCHDOG_STALE_MS){watchdogStaleChecks=0;return;}
+ watchdogStaleChecks++;
+ if(watchdogStaleChecks<WATCHDOG_CONFIRMATIONS){addLog(`Watchdog: heartbeat atrasado (${Math.round(age/1000)}s); confirmação ${watchdogStaleChecks}/${WATCHDOG_CONFIRMATIONS}.`);return;}
+ watchdogStaleChecks=0;
  watchdogRestarts++; recoveryCount++; lastRecoveryAt=new Date().toISOString();
  setStatus({phase:'recovering',online:false,lastReason:`Watchdog: processo sem resposta por ${Math.round(age/1000)}s`,watchdogRestarts,recoveryCount,lastRecoveryAt});
  addLog(`⚠️ Watchdog detectou processo sem resposta por ${Math.round(age/1000)}s. Recuperando...`);
@@ -110,7 +118,7 @@ async function watchdog(){
 function send(type,payload={}){if(!child)return {ok:false,error:'Bot desligado.'};if(!status.online)return {ok:false,error:`Bot ainda não está online. Status: ${status.phase}`};child.send({type,payload});addLog('📨 '+type);return {ok:true,message:'Comando enviado.'}}
 async function poolSync(autoStart=true){
  if(!MASTER_URL||/SEU-MASTER/i.test(MASTER_URL))return null;
- const r=await fetch(MASTER_URL+'/api/agents/register',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({agentKey:AGENT_KEY,agentUrl:AGENT_URL,status})});
+ const r=await fetch(MASTER_URL+'/api/agents/register',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({agentKey:AGENT_KEY,agentUrl:AGENT_URL,status}),signal:AbortSignal.timeout(20000)});
  const d=await r.json(); if(!r.ok||!d.ok)throw new Error(d.error||`Master HTTP ${r.status}`);
  poolApproved=!!d.approved; if(!poolApproved){setStatus({phase:'waiting_approval',online:false,lastReason:'Aguardando aprovação no Master'});return d;}
  AGENT_SECRET=String(d.agentSecret||AGENT_SECRET||'');
@@ -125,7 +133,7 @@ async function heartbeat(log){
  if(!MASTER_URL)return; try{
    if(log===undefined){log=pendingMasterLog;pendingMasterLog='';}
    if(!poolApproved||!AGENT_SECRET||!BOT_ID){await poolSync(true);return;}
-   const r=await fetch(MASTER_URL+'/api/agent/heartbeat',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({botId:BOT_ID,agentKey:AGENT_KEY,agentSecret:AGENT_SECRET,status,log:log||''})});
+   const r=await fetch(MASTER_URL+'/api/agent/heartbeat',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({botId:BOT_ID,agentKey:AGENT_KEY,agentSecret:AGENT_SECRET,status,log:log||''}),signal:AbortSignal.timeout(20000)});
    if(r.ok){const d=await r.json();desiredRunning=!!d.desiredOnline;if(!desiredRunning&&child)await stop();}
    else if(r.status===403){poolApproved=false;AGENT_SECRET='';}
  }catch{}
