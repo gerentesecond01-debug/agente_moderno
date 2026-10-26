@@ -23,6 +23,10 @@ function regionSnapshot(bot){
 async function execute(bot,state,p,groups){
  const action=safe(p.action).toLowerCase();
  const g=bot?.clientCommands?.group||bot?.clientCommands?.groups;
+ if(action==='stopanim'||action==='startanim'){
+  if(typeof groups.animationCommand!=='function')throw Error('Controle de animações indisponível');
+  return {ok:true,message:await groups.animationCommand(action==='stopanim'?'stop':'start',p.animationID)};
+ }
  if(action==='snapshot')return {ok:true,region:regionSnapshot(bot),dialogs:state.dialogs,walk:state.walk,capabilities:{groupList:typeof bot?.clientCommands?.agent?.getAvatarGroups==='function',hudReply:!!bot?.clientCommands?.comms?.respondToScriptDialog,autoWalk:!!bot?.clientCommands?.movement?.autoPilot}};
  if(action==='group_diagnostic'){return {ok:true,diagnostic:JSON.parse(await groups.groupDiagnosticCommand())};}
  if(action==='groups'){const message=await groups.listGroupsByAdminCommand();const entries=typeof groups.getGroupEntries==='function'?groups.getGroupEntries():[];return {ok:entries.length>0,groups:entries,message};}
